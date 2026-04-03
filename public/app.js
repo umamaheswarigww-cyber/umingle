@@ -343,16 +343,63 @@ function syncModeUi(mode) {
   }
 }
 
-// ── Local media ───────────────────────────────────────────
+// ── Local media (adaptive quality ladder) ───────────────────
 async function setupLocalMedia() {
+  // Reuse existing stream if all tracks are still live
   if (localStream && localStream.getTracks().every(t => t.readyState === "live")) {
     localVideo.srcObject = localStream;
     return;
   }
-  const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+
+  // Quality ladder: 720p → 480p → basic. First success wins.
+  const QUALITY_LADDER = [
+    {
+      video: {
+        width:     { ideal: 1280, min: 640 },
+        height:    { ideal: 720,  min: 480 },
+        frameRate: { ideal: 30,   min: 15 },
+        facingMode: "user"
+      },
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl:  true,
+        sampleRate:       { ideal: 48000 }
+      }
+    },
+    {
+      video: {
+        width:     { ideal: 640 },
+        height:    { ideal: 480 },
+        frameRate: { ideal: 24 },
+        facingMode: "user"
+      },
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    },
+    {
+      video: { facingMode: "user" },
+      audio: true
+    }
+  ];
+
+  let stream = null;
+  for (const constraints of QUALITY_LADDER) {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+      break;
+    } catch (e) {
+      console.warn("[media] Quality fallback:", e.name);
+    }
+  }
+
+  if (!stream) throw new Error("Camera/mic access denied");
+
   localStream = stream;
   localVideo.srcObject = stream;
   localVideo.muted = true;
+  // iOS Safari needs explicit play() after setting srcObject
+  localVideo.setAttribute("playsinline", "");
+  localVideo.setAttribute("webkit-playsinline", "");
   await localVideo.play().catch(() => {});
 }
 
@@ -392,14 +439,22 @@ function buildPeerConnection() {
   localStream.getTracks().forEach(track => {
     const sender = peerConnection.addTrack(track, localStream);
     if (track.kind === "video") {
-      const params = sender.getParameters();
-      if (!params.encodings?.length) params.encodings = [{}];
-      params.encodings[0].maxBitrate  = 700000;
-      params.encodings[0].maxFramerate = 24;
-      sender.setParameters(params).catch(() => {});
+      // Apply bitrate & framerate caps after SDP negotiation (async)
+      setTimeout(() => {
+        try {
+          const params = sender.getParameters();
+          if (!params.encodings?.length) params.encodings = [{}];
+          // 1.5 Mbps handles 720p cleanly; browser downgrades if link is poor
+          params.encodings[0].maxBitrate      = 1_500_000;
+          params.encodings[0].maxFramerate    = 30;
+          params.encodings[0].networkPriority = "high";
+          sender.setParameters(params).catch(() => {});
+        } catch (_) {}
+      }, 2000);
     }
   });
 
+  // Prefer VP9 (better quality/compression) then H264, then fallback
   peerConnection.ontrack = event => {
     const [stream] = event.streams;
     if (stream) {
@@ -410,6 +465,9 @@ function buildPeerConnection() {
       remoteStream.addTrack(event.track);
     }
     remoteVideo.srcObject = remoteStream;
+    // iOS Safari requires playsinline + explicit play
+    remoteVideo.setAttribute("playsinline", "");
+    remoteVideo.setAttribute("webkit-playsinline", "");
     remoteVideo.play().catch(() => {});
     remotePlaceholder.classList.add("hidden");
   };

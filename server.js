@@ -37,8 +37,8 @@ app.get("/healthz", (_req, res) => res.json({ ok: true, users: users.size }));
 // ── Socket.IO ─────────────────────────────────────────────
 const io = new Server(server, {
   transports: ["websocket", "polling"],   // polling fallback for strict firewalls
-  pingTimeout:        30000,
-  pingInterval:       15000,
+  pingTimeout:        20000,   // 20s — detect dead clients faster, free slots sooner
+  pingInterval:       10000,   // 10s — more frequent heartbeat
   maxHttpBufferSize:  1e5,               // 100 KB max payload
   cors: {
     origin: "*",
@@ -383,4 +383,19 @@ io.on("connection", (socket) => {
 server.listen(PORT, () => {
   console.log(`🚀 Omingle running → http://localhost:${PORT}`);
   console.log(`   Node ${process.version} | PID ${process.pid}`);
+
+  // Keep Render free-tier warm: self-ping every 14 min so it doesn't spin down
+  // Only runs when RENDER_EXTERNAL_URL is set (i.e. deployed on Render)
+  if (process.env.RENDER_EXTERNAL_URL) {
+    const https = require("https");
+    const pingUrl = `${process.env.RENDER_EXTERNAL_URL}/healthz`;
+    setInterval(() => {
+      https.get(pingUrl, res => {
+        console.log(`[keep-alive] ping → ${res.statusCode}`);
+      }).on("error", err => {
+        console.warn("[keep-alive] failed:", err.message);
+      });
+    }, 14 * 60 * 1000);
+    console.log(`   Keep-alive pinging ${pingUrl} every 14 min`);
+  }
 });
