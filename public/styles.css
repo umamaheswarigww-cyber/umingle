@@ -1109,23 +1109,48 @@ kbd {
   100% { box-shadow: 0 0 0 0 currentColor; opacity:0; }
 }
 
-/* ── Responsive ────────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════
+   RESPONSIVE
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── Tablet / single-column (≤ 1080px) ─── */
 @media (max-width: 1080px) {
   .hero-panel, .chat-layout { grid-template-columns: 1fr; }
   .chat-sidebar { position: static; order: 2; }
-  .chat-main { order: 1; }
+  .chat-main    { order: 1; }
   .controls-card { grid-template-columns: repeat(3,1fr); }
 }
 
-/* ── Mobile (≤ 720px) ───────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════
+   MOBILE  (≤ 720px)
+   Strategy:
+     • Lock .screen-chat to the full viewport (position:fixed) so
+       the page NEVER scrolls — only the messages list scrolls.
+     • Use display:contents on .chat-main so its children (video +
+       messages) participate directly in the parent flex column.
+     • Sidebar (controls) goes inline between video and messages —
+       NO position:fixed that breaks on Chrome Android URL-bar shift.
+   Layout order inside .chat-layout flex column:
+     [1] video-stage  (flex-shrink:0, fixed height)
+     [2] chat-sidebar → controls strip  (flex-shrink:0)
+     [3] messages-panel  (flex:1, only this scrolls)
+   ══════════════════════════════════════════════════════════════ */
 @media (max-width: 720px) {
-  /* Base */
+
+  /* ── Global mobile resets ── */
   :root { --shell-padding: 0px; }
   * { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+  html { overscroll-behavior: none; }
 
-  html, body { overscroll-behavior: none; }
+  /* ── JOIN SCREEN — normal scrollable page ── */
+  .screen-join {
+    display: block;
+    padding: 0 12px 24px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
 
-  /* Shell — full bleed on mobile */
+  /* Shell full-bleed */
   .page-shell {
     width: 100%;
     max-width: 100%;
@@ -1133,230 +1158,257 @@ kbd {
     padding-top: env(safe-area-inset-top, 0px);
   }
 
-  /* Header — compact */
+  /* Header compact */
   .site-header {
     padding: 10px 16px;
     padding-top: calc(10px + env(safe-area-inset-top, 0px));
     border-radius: 0;
+    margin-bottom: 0;
     gap: 10px;
   }
-  .logo-mark { width: 32px; height: 32px; font-size: 1rem; }
-  .logo-text { font-size: 1.1rem; }
+  .logo-mark   { width: 32px; height: 32px; font-size: 1rem; }
+  .logo-text   { font-size: 1.1rem; }
   .header-center { order: 3; width: auto; }
-  .online-badge { font-size: 0.75rem; padding: 5px 12px; }
-  .sound-toggle { width: 34px; height: 34px; }
+  .online-badge  { font-size: 0.75rem; padding: 5px 12px; }
+  .sound-toggle  { width: 34px; height: 34px; }
 
-  /* ── Join screen ── */
-  .screen-join { padding: 0 12px 12px; }
-  .hero-panel { grid-template-columns: 1fr; gap: 12px; }
-
-  .hero-copy {
-    padding: 24px 18px;
-    border-radius: var(--radius-xl);
-  }
-  .hero-copy h1 { font-size: clamp(2.2rem, 11vw, 3.2rem); line-height: 1.1; }
-  .hero-stats { grid-template-columns: 1fr; gap: 8px; }
+  /* Join card + hero */
+  .hero-panel  { grid-template-columns: 1fr; gap: 12px; }
+  .hero-copy   { padding: 24px 18px; border-radius: var(--radius-xl); }
+  .hero-copy h1{ font-size: clamp(2.2rem, 11vw, 3.2rem); line-height: 1.1; }
+  .hero-stats  { grid-template-columns: 1fr; gap: 8px; }
   .feature-chips { gap: 6px; }
-  .feature-chip { font-size: 0.75rem; padding: 5px 10px; }
-
-  .join-card { padding: 20px 16px; border-radius: var(--radius-xl); }
+  .feature-chip  { font-size: 0.75rem; padding: 5px 10px; }
+  .join-card   { padding: 20px 16px; border-radius: var(--radius-xl); }
   .mode-toggle { gap: 6px; }
-  .mode-btn { padding: 10px 12px; font-size: 0.85rem; }
-  .start-btn { padding: 14px; font-size: 1rem; touch-action: manipulation; }
+  .mode-btn    { padding: 10px 12px; font-size: 0.85rem; }
+  .start-btn   { padding: 14px; font-size: 1rem; }
+  /* 16px input font prevents iOS auto-zoom on focus */
+  .form-input, .form-select { min-height: 44px; font-size: 16px; }
 
-  /* Form controls — minimum 44px touch target */
-  .form-input, .form-select { min-height: 44px; font-size: 16px; /* prevents iOS zoom */ }
-
-  /* ── Chat screen ── */
+  /* ══════════════════════════════════════════════════════════
+     CHAT SCREEN — viewport-locked, zero page scroll
+     ══════════════════════════════════════════════════════════ */
   .screen-chat {
+    position: fixed;           /* lock to viewport — page scroll impossible */
+    top:    0;
+    left:   0;
+    right:  0;
+    bottom: 0;
+    z-index: 10;
+    overflow: hidden;          /* hard wall — nothing scrolls at page level */
     display: flex;
     flex-direction: column;
-    min-height: 100dvh;           /* dynamic viewport height — accounts for browser chrome */
     padding: 0;
+    background: var(--bg);
   }
 
-  /* Chat layout: main first, sidebar as fixed bottom bar */
+  /* page-shell inside chat fills remaining height */
+  .screen-chat .page-shell {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+    padding: 0;
+    width: 100%;
+    max-width: 100%;
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  /* Header inside chat: compact, non-scrolling */
+  .screen-chat .site-header {
+    flex-shrink: 0;
+    margin-bottom: 0;
+  }
+
+  /* ── chat-layout: flex column ── */
   .chat-layout {
-    grid-template-columns: 1fr;
-    grid-template-rows: 1fr;
+    display: flex !important;      /* override desktop grid */
+    flex-direction: column;
     flex: 1;
     overflow: hidden;
     min-height: 0;
-  }
-
-  /* Sidebar → fixed bottom control bar */
-  .chat-sidebar {
-    order: 2;
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    z-index: 300;
-    background: rgba(5, 11, 18, 0.97);
-    backdrop-filter: blur(24px);
-    -webkit-backdrop-filter: blur(24px);
-    border-top: 1px solid var(--border);
-    padding: 0;
-    padding-bottom: env(safe-area-inset-bottom, 0px);
-    display: block !important;       /* override any grid display */
-    max-height: 90px;                /* hard cap — can never grow tall enough to hide content */
-    overflow: visible;
     gap: 0;
   }
 
-  /* Hide sidebar cards not needed in the bottom bar */
+  /* ── chat-main: transparent to flex (display:contents) ──
+     Its children (video-stage + messages-panel) become direct
+     children of chat-layout and participate in the flex column. */
+  .chat-main {
+    display: contents;
+    padding-bottom: 0;
+  }
+
+  /* ── [ORDER 1] Video stage ── */
+  .video-stage {
+    order: 1;
+    flex-shrink: 0;
+    height: 36vw;               /* square-ish: 36% of viewport width */
+    min-height: 190px;
+    max-height: 260px;
+    border-radius: 0;
+    border-left:  none;
+    border-right: none;
+    border-top:   none;
+  }
+
+  /* text-mode notice (replaces video-stage in text mode) */
+  .text-mode-notice {
+    order: 1;
+    flex-shrink: 0;
+    min-height: 80px;
+    height: 80px;
+    border-radius: 0;
+  }
+
+  /* Local PIP */
+  .local-card {
+    width: 28%; height: 28%;
+    min-width: 80px; min-height: 70px;
+    right: 8px; bottom: 8px;
+  }
+
+  /* ── [ORDER 2] Sidebar → control strip (BELOW video, NOT fixed) ──
+     position: static — no stacking-context tricks, always reliable. */
+  .chat-sidebar {
+    order: 2;
+    position: static !important;   /* never fixed — stays in document flow */
+    flex-shrink: 0;
+    background: rgba(8, 15, 24, 0.98);
+    border-top:    1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    display: block !important;
+    padding: 0;
+    padding-bottom: 0;
+    max-height: none;
+    overflow: visible;
+    z-index: auto;
+  }
+
+  /* Hide non-control cards */
   .chat-sidebar .status-card,
   .chat-sidebar .tips-card { display: none !important; }
 
-  /* Controls → horizontal scrollable strip */
+  /* Controls strip: compact horizontal row */
   .controls-card {
-    display: flex !important;        /* override desktop grid */
-    flex-direction: row !important;
+    display:        flex !important;
+    flex-direction: row  !important;
+    flex-wrap:      nowrap;
     grid-template-columns: unset;
-    gap: 6px;
-    padding: 8px 12px;
-    background: transparent;
-    border: none;
+    align-items:  center;
+    gap:     5px;
+    padding: 7px 10px;
+    padding-bottom: 7px;
+    background:    transparent;
+    border:        none;
     border-radius: 0;
-    overflow-x: auto;
-    overflow-y: hidden;
+    overflow-x:   auto;
+    overflow-y:   hidden;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
-    white-space: nowrap;
-    align-items: center;
-    max-height: 72px;               /* keeps the bar tight */
+    max-height: 64px;
   }
   .controls-card::-webkit-scrollbar { display: none; }
 
   .control-btn {
-    flex: 0 0 auto;
+    flex:           0 0 auto;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 3px;
-    min-width: 60px;
-    min-height: 52px;              /* 44px minimum touch target */
-    padding: 8px 10px;
-    font-size: 0.68rem;
+    align-items:    center;
+    justify-content:center;
+    gap:       3px;
+    min-width: 58px;
+    min-height:48px;
+    padding:   7px 9px;
+    font-size: 0.66rem;
     border-radius: var(--radius-md);
     white-space: nowrap;
   }
-  .control-btn svg { width: 18px; height: 18px; }
-  .control-btn:hover { transform: none; }       /* no hover flicker on touch */
-  .control-btn:active { transform: scale(0.95); }
+  .control-btn svg  { width: 17px; height: 17px; }
+  .control-btn:hover  { transform: none; }
+  .control-btn:active { transform: scale(0.94); }
 
-  /* Chat main — fills space above bottom bar */
-  .chat-main {
-    order: 1;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    flex: 1;
-    gap: 0;
-    /* 90px bar + safe-area + extra breathing room so nothing is hidden */
-    padding-bottom: calc(90px + env(safe-area-inset-bottom, 0px));
-    overflow: hidden;
-  }
-
-  /* Video stage — full width, portrait proportion */
-  .video-stage {
-    border-radius: 0;
-    border-left: none;
-    border-right: none;
-    border-top: none;
-    min-height: 220px;
-    max-height: 38vh;
-    flex-shrink: 0;
-  }
-
-  /* Local PIP — smaller on mobile, stays in corner */
-  .local-card {
-    width: 28%;
-    height: 28%;
-    min-height: 80px;
-    min-width: 90px;
-    right: 8px;
-    bottom: 8px;
-  }
-
-  /* Text mode notice */
-  .text-mode-notice { min-height: 120px; }
-
-  /* Messages panel — fills remaining space */
+  /* ── [ORDER 3] Messages panel — grows to fill remaining space ── */
   .messages-panel {
+    order: 3;
     flex: 1;
+    min-height: 0;
     max-height: none;
     border-radius: 0;
-    border-left: none;
+    border-left:  none;
     border-right: none;
     overflow: hidden;
     display: flex;
     flex-direction: column;
   }
 
+  /* ONLY the messages list scrolls — contained, no bubble-up */
   .messages {
     flex: 1;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
-    overscroll-behavior: contain;
+    overscroll-behavior-y: contain;  /* prevents triggering page scroll */
   }
 
-  .message { max-width: 88%; }
-  .message.sent { margin-left: auto; }
+  .message     { max-width: 88%; }
+  .message.sent{ margin-left: auto; }
 
-  /* Emoji bar — horizontal scroll, no wrap */
+  /* Emoji bar — single-line horizontal scroll */
   .emoji-bar {
+    flex-shrink: 0;
     overflow-x: auto;
     overflow-y: hidden;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
     flex-wrap: nowrap;
     justify-content: flex-start;
-    padding: 8px 10px;
-    gap: 6px;
+    padding: 7px 10px;
+    gap: 5px;
     border-radius: 0;
   }
   .emoji-bar::-webkit-scrollbar { display: none; }
-  .emoji-btn { font-size: 1.3rem; min-width: 38px; min-height: 38px; } /* 44px-ish touch */
+  .emoji-btn { font-size: 1.3rem; min-width: 36px; min-height: 36px; }
 
-  /* Composer */
+  /* Composer — pinned to bottom of messages-panel */
   .composer {
+    flex-shrink: 0;
     border-radius: 0;
-    padding: 10px;
+    padding: 8px 10px;
+    padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
     gap: 8px;
   }
   .composer input {
-    font-size: 16px; /* prevents iOS zoom on focus */
+    font-size: 16px;  /* no iOS zoom */
     min-height: 40px;
   }
-  .send-btn { width: 40px; height: 40px; }
-  .char-count { display: none; }   /* hide on mobile to save space */
+  .send-btn   { width: 40px; height: 40px; }
+  .char-count { display: none; }
 
-  /* Scroll-to-bottom button */
-  .scroll-down-btn { bottom: calc(80px + env(safe-area-inset-bottom, 0px)); }
-
-  /* Toast — above bottom bar */
-  .toast-container { bottom: calc(80px + env(safe-area-inset-bottom, 0px)); }
-
-  /* Reconnect overlay */
-  .reconnect-overlay { padding: 20px 16px; }
+  /* Scroll-to-bottom & toast: above composer */
+  .scroll-down-btn  { bottom: 70px; }
+  .toast-container  { top: auto; bottom: 70px; right: 12px; }
 }
 
-/* ── Very small phones (≤ 380px) ───────────────────────────── */
+/* ── Very small phones (≤ 380px) ── */
 @media (max-width: 380px) {
-  .hero-copy h1 { font-size: 2rem; }
-  .control-btn { min-width: 52px; font-size: 0.62rem; }
-  .local-card { width: 26%; min-width: 75px; min-height: 65px; }
+  .hero-copy h1   { font-size: 2rem; }
+  .control-btn    { min-width: 50px; font-size: 0.61rem; }
+  .local-card     { width: 26%; min-width: 72px; min-height: 62px; }
+  .video-stage    { min-height: 170px; }
 }
 
-/* ── Landscape phone ────────────────────────────────────────── */
+/* ── Landscape phone ── */
 @media (max-width: 900px) and (orientation: landscape) and (max-height: 500px) {
-  .video-stage { max-height: 55vh; min-height: 180px; }
-  .messages-panel { max-height: 30vh; }
-  .controls-card { padding: 6px 12px; }
-  .control-btn { min-height: 42px; padding: 6px 8px; }
-  .chat-main {
-    padding-bottom: calc(58px + env(safe-area-inset-bottom, 0px));
-  }
+  .screen-chat    { position: fixed; inset: 0; overflow: hidden; }
+  .video-stage    { max-height: 50vh; min-height: 160px; height: 50vh; }
+  .controls-card  { padding: 5px 10px; max-height: 52px; }
+  .control-btn    { min-height: 40px; padding: 5px 8px; }
 }
+
+
+
+
+
+
+
 
