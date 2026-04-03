@@ -1198,23 +1198,23 @@ kbd {
     border-top: 1px solid var(--border);
     padding: 0;
     padding-bottom: env(safe-area-inset-bottom, 0px);
-    display: block;
-    gap: 0;
-    max-height: none;
+    display: block !important;       /* override any grid display */
+    max-height: 90px;                /* hard cap — can never grow tall enough to hide content */
     overflow: visible;
+    gap: 0;
   }
 
   /* Hide sidebar cards not needed in the bottom bar */
   .chat-sidebar .status-card,
-  .chat-sidebar .tips-card { display: none; }
+  .chat-sidebar .tips-card { display: none !important; }
 
   /* Controls → horizontal scrollable strip */
   .controls-card {
-    display: flex;
-    flex-direction: row;
+    display: flex !important;        /* override desktop grid */
+    flex-direction: row !important;
     grid-template-columns: unset;
     gap: 6px;
-    padding: 10px 12px;
+    padding: 8px 12px;
     background: transparent;
     border: none;
     border-radius: 0;
@@ -1223,6 +1223,8 @@ kbd {
     -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
     white-space: nowrap;
+    align-items: center;
+    max-height: 72px;               /* keeps the bar tight */
   }
   .controls-card::-webkit-scrollbar { display: none; }
 
@@ -1251,7 +1253,8 @@ kbd {
     min-height: 0;
     flex: 1;
     gap: 0;
-    padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px)); /* space for bottom bar */
+    /* 90px bar + safe-area + extra breathing room so nothing is hidden */
+    padding-bottom: calc(90px + env(safe-area-inset-bottom, 0px));
     overflow: hidden;
   }
 

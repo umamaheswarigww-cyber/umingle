@@ -537,12 +537,25 @@ function returnToLobby() {
   setChatEnabled(false);
   closePeerConnection();
   stopLocalMedia();
+
+  // Show join screen
   chatScreen.classList.add("hidden");
   joinScreen.classList.remove("hidden");
+
+  // ✅ BUG FIX: always re-enable the start button so user can start again
+  startBtn.disabled = false;
+
+  // Clean up chat state
   typingDots.classList.add("hidden");
   clearTimeout(typingTimeout);
   messages.innerHTML = "";
   charCount.textContent = "0/500";
+  isScrollLocked = false;
+  scrollLockBtn.classList.add("hidden");
+
+  // Hide reconnect overlay in case it was showing
+  reconnectOverlay.classList.add("hidden");
+
   renderInterestPreview();
 }
 
@@ -765,19 +778,41 @@ socket.on("chat-ended", ({ message }) => {
 });
 
 // ── Reconnection ──────────────────────────────────────────
-socket.on("disconnect", () => {
-  reconnectOverlay.classList.remove("hidden");
+// Only show overlay for unexpected drops (not when user intentionally ends chat)
+let _intentionalLeave = false;
+
+const _origEndBtn = endBtn.onclick;
+endBtn.addEventListener("click", () => { _intentionalLeave = true; }, { capture: true });
+nextBtn.addEventListener("click", () => { _intentionalLeave = true; }, { capture: true });
+homeLink.addEventListener("click", () => { _intentionalLeave = true; }, { capture: true });
+
+socket.on("disconnect", (reason) => {
+  // Don't flash the overlay when WE initiated the disconnect
+  if (_intentionalLeave) { _intentionalLeave = false; return; }
+  // Only show reconnect overlay if we're actually in a chat session
+  if (!chatScreen.classList.contains("hidden")) {
+    reconnectOverlay.classList.remove("hidden");
+  }
   showToast("Connection lost — reconnecting…", "danger");
 });
 
-socket.on("reconnect", () => {
+function _hideReconnectOverlay() {
   reconnectOverlay.classList.add("hidden");
-  showToast("Reconnected! ✅", "success");
+  _intentionalLeave = false;
+}
+
+socket.on("reconnect",         () => { _hideReconnectOverlay(); showToast("Reconnected! ✅", "success"); });
+socket.on("reconnect_attempt", () => { /* keep overlay visible while retrying */ });
+socket.on("reconnect_failed",  () => {
+  _hideReconnectOverlay();
+  showToast("Could not reconnect. Please refresh.", "danger", 8000);
+  returnToLobby();
 });
 
-socket.on("reconnect_failed", () => {
-  reconnectOverlay.classList.add("hidden");
-  showToast("Could not reconnect. Please refresh.", "danger", 8000);
+// Also hide overlay as soon as socket re-connects at transport level
+socket.on("connect", () => {
+  _hideReconnectOverlay();
+  startBtn.disabled = false; // re-enable in case it was stuck
 });
 
 // ── Init ──────────────────────────────────────────────────
