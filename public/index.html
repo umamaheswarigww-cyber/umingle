@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Omingle — Talk to Strangers</title>
+  <meta name="description" content="Omingle: instant random video & text chat with strangers. No login needed. Meet someone new right now." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+  <script src="/socket.io/socket.io.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+
+  <!-- ░░ Toast Container ░░ -->
+  <div id="toastContainer" class="toast-container" aria-live="polite"></div>
+
+  <!-- ░░ Reconnect Overlay ░░ -->
+  <div id="reconnectOverlay" class="reconnect-overlay hidden">
+    <div class="reconnect-box">
+      <div class="reconnect-spinner"></div>
+      <p>Reconnecting to Omingle…</p>
+    </div>
+  </div>
+
+  <!-- ░░ Particle Canvas ░░ -->
+  <canvas id="particleCanvas" class="particle-canvas"></canvas>
+
+  <div class="page-shell">
+
+    <!-- ── HEADER ─────────────────────────────────── -->
+    <header class="site-header">
+      <a class="brand-mark" href="#" id="homeLink">
+        <span class="brand-mark__icon">O</span>
+        <span class="brand-mark__text">Omingle</span>
+      </a>
+      <div class="header-center">
+        <div class="online-counter">
+          <span class="online-dot"></span>
+          <span id="onlineCount">—</span>
+          <span class="online-label">online now</span>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button id="soundToggleBtn" class="icon-btn" title="Toggle sounds" aria-label="Toggle sounds">
+          <svg id="soundIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+            <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- ── MAIN ───────────────────────────────────── -->
+    <main class="page-main">
+
+      <!-- ════ JOIN SCREEN ════ -->
+      <section id="joinScreen" class="screen screen-join">
+        <div class="hero-panel">
+
+          <!-- Left: hero copy -->
+          <div class="hero-copy reveal-up">
+            <p class="eyebrow">Random chat, reinvented</p>
+            <h1>Talk to<br /><span class="gradient-text">anyone,</span><br />anywhere.</h1>
+            <p class="hero-text">
+              Jump into an instant one-on-one conversation with a stranger.
+              Video or text — no accounts, no wait, no nonsense.
+            </p>
+
+            <div class="hero-stats">
+              <article class="stat-card">
+                <div class="stat-icon">🎲</div>
+                <strong>Truly random</strong>
+                <span>Interest-based or pure chance — you choose.</span>
+              </article>
+              <article class="stat-card">
+                <div class="stat-icon">⚡</div>
+                <strong>Instant match</strong>
+                <span>Connected in seconds. Skip freely anytime.</span>
+              </article>
+              <article class="stat-card">
+                <div class="stat-icon">🔒</div>
+                <strong>Stay safe</strong>
+                <span>No accounts. No history. Just a conversation.</span>
+              </article>
+            </div>
+
+            <div class="safety-strip">
+              <span class="safety-dot"></span>
+              <span>Be respectful — never share personal info — report abuse instantly.</span>
+            </div>
+          </div>
+
+          <!-- Right: join card -->
+          <aside class="join-card reveal-up reveal-delay-1">
+            <div class="join-card__header">
+              <p class="eyebrow">Get started</p>
+              <h2>Start a chat</h2>
+              <p>Pick your mode and jump straight in.</p>
+            </div>
+
+            <!-- Mode toggle -->
+            <div class="mode-toggle" role="radiogroup" aria-label="Chat mode">
+              <label class="mode-option" id="videoModeLabel">
+                <input type="radio" name="chatMode" value="video" checked />
+                <span>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="15" height="10" rx="2"/><polyline points="17 9 22 6 22 18 17 15"/></svg>
+                  Video
+                </span>
+              </label>
+              <label class="mode-option" id="textModeLabel">
+                <input type="radio" name="chatMode" value="text" />
+                <span>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                  Text
+                </span>
+              </label>
+            </div>
+
+            <label class="field">
+              <span>Your name</span>
+              <input id="nameInput" type="text" maxlength="30" placeholder="Anonymous" autocomplete="off" />
+            </label>
+
+            <label class="field">
+              <span>Gender</span>
+              <select id="genderSelect">
+                <option value="male">Male</option>
+                <option value="female">Female</option>
+                <option value="other" selected>Prefer not to say</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Interests <small>(optional)</small></span>
+              <input id="interestsInput" type="text" placeholder="music, coding, football…" autocomplete="off" />
+            </label>
+
+            <div id="interestPreview" class="interest-preview empty"></div>
+
+            <button id="startBtn" class="primary-btn" type="button">
+              <span class="btn-text">Start Omingle</span>
+              <span class="btn-arrow">→</span>
+            </button>
+
+            <p class="join-note">
+              Camera &amp; mic only used in video mode. No recording, no storage.
+            </p>
+          </aside>
+
+        </div>
+      </section>
+
+      <!-- ════ CHAT SCREEN ════ -->
+      <section id="chatScreen" class="screen screen-chat hidden">
+        <div class="chat-layout">
+
+          <!-- Sidebar -->
+          <aside class="chat-sidebar">
+
+            <div class="status-card">
+              <div class="status-card__top">
+                <span id="modePill" class="mode-pill">Video</span>
+                <span class="status-live">
+                  <span class="live-dot"></span>
+                  Live
+                </span>
+              </div>
+              <h2 id="statusBadge">Searching…</h2>
+              <p id="strangerLabel" class="status-subtitle">Waiting for match</p>
+
+              <div class="shared-section">
+                <p class="meta-label">Shared interests</p>
+                <div id="sharedInterests" class="shared-interests empty"></div>
+              </div>
+            </div>
+
+            <div class="controls-card">
+              <button id="muteBtn" class="control-btn" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+                Mute
+              </button>
+              <button id="cameraBtn" class="control-btn" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+                Camera Off
+              </button>
+              <button id="nextBtn" class="control-btn control-btn--accent" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg>
+                Next
+              </button>
+              <button id="endBtn" class="control-btn control-btn--danger" type="button">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                End Chat
+              </button>
+              <button id="reportBtn" class="control-btn control-btn--ghost" type="button" disabled>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
+                Report
+              </button>
+            </div>
+
+            <div class="tips-card">
+              <p class="meta-label">Quick tips</p>
+              <ul>
+                <li><kbd>Enter</kbd> — send message</li>
+                <li><kbd>Esc</kbd> — skip to next</li>
+                <li>React with emoji bar below chat</li>
+              </ul>
+            </div>
+
+          </aside>
+
+          <!-- Main chat area -->
+          <section class="chat-main">
+
+            <!-- Video stage -->
+            <div id="videoStage" class="video-stage">
+              <article id="remoteCard" class="video-card remote-card">
+                <div class="video-card__head">
+                  <span id="remoteTag">Stranger</span>
+                  <span class="video-card__status">Omingle Live</span>
+                </div>
+                <video id="remoteVideo" autoplay playsinline></video>
+                <div class="video-placeholder" id="remotePlaceholder">
+                  <div class="avatar-ring">
+                    <span id="remoteInitial">?</span>
+                  </div>
+                  <p>Waiting for video…</p>
+                </div>
+              </article>
+
+              <article id="localCard" class="video-card local-card">
+                <div class="video-card__head">
+                  <span>You</span>
+                  <span class="video-card__status">Preview</span>
+                </div>
+                <video id="localVideo" autoplay playsinline muted></video>
+              </article>
+
+              <!-- Emoji reaction floater zone -->
+              <div id="emojiFloatZone" class="emoji-float-zone"></div>
+            </div>
+
+            <!-- Text mode notice -->
+            <div id="textModeNotice" class="text-mode-notice hidden">
+              <div class="text-mode-icon">💬</div>
+              <h3>Text Mode</h3>
+              <p>Camera-free chat. Your messages are the spotlight.</p>
+            </div>
+
+            <!-- Messages panel -->
+            <section class="messages-panel">
+              <div class="messages-panel__head">
+                <div>
+                  <p class="meta-label">Conversation</p>
+                  <h3>Messages</h3>
+                </div>
+                <div class="panel-head-right">
+                  <div id="typingDots" class="typing-dots hidden">
+                    <span></span><span></span><span></span>
+                  </div>
+                  <button id="scrollLockBtn" class="scroll-lock-btn hidden" title="Scroll to bottom">↓</button>
+                </div>
+              </div>
+
+              <div id="messages" class="messages" aria-live="polite"></div>
+
+              <!-- Emoji reaction bar -->
+              <div class="emoji-bar" id="emojiBar">
+                <button class="emoji-btn" data-emoji="❤️">❤️</button>
+                <button class="emoji-btn" data-emoji="😂">😂</button>
+                <button class="emoji-btn" data-emoji="😮">😮</button>
+                <button class="emoji-btn" data-emoji="🔥">🔥</button>
+                <button class="emoji-btn" data-emoji="👍">👍</button>
+                <button class="emoji-btn" data-emoji="😢">😢</button>
+                <button class="emoji-btn" data-emoji="🎉">🎉</button>
+                <button class="emoji-btn" data-emoji="💀">💀</button>
+              </div>
+
+              <div class="composer">
+                <input id="messageInput" type="text" placeholder="Waiting for a match…" disabled maxlength="500" autocomplete="off" />
+                <span id="charCount" class="char-count">0/500</span>
+                <button id="sendBtn" class="send-btn" type="button" disabled>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                </button>
+              </div>
+            </section>
+
+          </section>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+</body>
+</html>

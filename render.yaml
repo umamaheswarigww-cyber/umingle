@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: omingle
+    runtime: node
+    plan: starter            # upgrade to standard for more RAM/CPU
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_OPTIONS
+        value: "--max-old-space-size=400"   # 400 MB heap, leaves headroom in 512 MB container
