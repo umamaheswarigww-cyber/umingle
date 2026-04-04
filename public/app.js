@@ -50,6 +50,7 @@ const endBtn       = document.getElementById("endBtn");
 const reportBtn    = document.getElementById("reportBtn");
 const connSignal   = document.getElementById("connSignal");
 const connLabel    = document.getElementById("connLabel");
+const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
 
 function updateConnStatus(type, text) {
   if (!connSignal || !connLabel) return;
@@ -60,13 +61,69 @@ function updateConnStatus(type, text) {
   );
 }
 
+function isLocalhost() {
+  return ["localhost", "127.0.0.1", "::1"].includes(location.hostname);
+}
+
+function isMediaContextSecure() {
+  return window.isSecureContext || isLocalhost();
+}
+
+function hasGetUserMedia() {
+  return !!navigator.mediaDevices?.getUserMedia;
+}
+
+function getMediaSupportError() {
+  if (!hasGetUserMedia()) {
+    return "This browser can't access your camera or microphone.";
+  }
+  if (!isMediaContextSecure()) {
+    return "Video chat needs HTTPS to access the camera and mic.";
+  }
+  return "";
+}
+
+function createAudioContext(options) {
+  if (!AudioContextCtor) {
+    throw new Error("Web Audio is not supported in this browser");
+  }
+  return options ? new AudioContextCtor(options) : new AudioContextCtor();
+}
+
+async function resumeKnownAudioContexts() {
+  const contexts = [audioCtx, _relayAudioCtx, _relayAudioPlayCtx].filter(Boolean);
+  await Promise.all(contexts.map(ctx => (
+    ctx.state === "suspended" ? ctx.resume().catch(() => {}) : Promise.resolve()
+  )));
+}
+
+function attachLocalPreview(stream) {
+  localVideo.srcObject = stream;
+  localVideo.autoplay = true;
+  localVideo.playsInline = true;
+  localVideo.muted = true;
+  localVideo.volume = 0;
+  localVideo.setAttribute("playsinline", "");
+  localVideo.setAttribute("webkit-playsinline", "");
+  localVideo.play().catch(() => {});
+}
+
+function prepareRemoteVideo() {
+  remoteVideo.autoplay = true;
+  remoteVideo.playsInline = true;
+  remoteVideo.muted = false;
+  remoteVideo.volume = 1;
+  remoteVideo.setAttribute("playsinline", "");
+  remoteVideo.setAttribute("webkit-playsinline", "");
+}
+
 async function ensureRemotePlayback(reason = "track") {
   if (!remoteVideo.srcObject) return false;
 
-  remoteVideo.setAttribute("playsinline", "");
-  remoteVideo.setAttribute("webkit-playsinline", "");
+  prepareRemoteVideo();
 
   try {
+    await resumeKnownAudioContexts();
     await remoteVideo.play();
     _remoteIsPlaying = true;
     remotePlaceholder.classList.add("hidden");
@@ -109,13 +166,21 @@ function bindRemotePlaybackEvents() {
   remoteVideo.addEventListener("canplay", () => {
     if (remoteVideo.srcObject) ensureRemotePlayback("canplay").catch(() => {});
   });
+  remoteVideo.addEventListener("loadedmetadata", () => {
+    if (remoteVideo.srcObject) ensureRemotePlayback("loadedmetadata").catch(() => {});
+  });
   remoteVideo.addEventListener("waiting", markBuffering);
   remoteVideo.addEventListener("stalled", markBuffering);
   remoteVideo.addEventListener("pause", markBuffering);
   remoteVideo.addEventListener("emptied", markBuffering);
 
-  remotePlaceholder.addEventListener("click", () => {
+  remotePlaceholder.addEventListener("click", async () => {
+    await resumeKnownAudioContexts().catch(() => {});
     if (remoteVideo.srcObject) ensureRemotePlayback("manual-tap").catch(() => {});
+  });
+  remoteVideo.addEventListener("click", async () => {
+    await resumeKnownAudioContexts().catch(() => {});
+    if (remoteVideo.srcObject) ensureRemotePlayback("video-tap").catch(() => {});
   });
 }
 
@@ -231,7 +296,7 @@ function _startSocketRelay() {
   try {
     const stream = localStream || localVideo.srcObject;
     if (stream && stream.getAudioTracks().length > 0) {
-      _relayAudioCtx = new AudioContext({ sampleRate: 16000 });
+      _relayAudioCtx = createAudioContext({ sampleRate: 16000 });
       // Ensure AudioContext is running (user gesture should already have unlocked it)
       _relayAudioCtx.resume().catch(() => {});
       const src       = _relayAudioCtx.createMediaStreamSource(stream);
@@ -303,7 +368,7 @@ socket.on("relay-video-frame", (frame) => {
 socket.on("relay-audio-chunk", (chunk) => {
   try {
     if (!_relayAudioPlayCtx) {
-      _relayAudioPlayCtx = new AudioContext({ sampleRate: 16000 });
+      _relayAudioPlayCtx = createAudioContext({ sampleRate: 16000 });
       _relayNextPlayTime  = _relayAudioPlayCtx.currentTime + 0.1;
     }
     // NUCLEAR FIX: Always try to resume on every chunk (fails silent if already running)
@@ -426,7 +491,7 @@ refreshIceServers();
 
 // ── Sound engine (Web Audio API) ──────────────────────────
 function getAudioCtx() {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (!audioCtx) audioCtx = createAudioContext();
   return audioCtx;
 }
 
@@ -620,7 +685,11 @@ let _prewarmPromise = null;
  * This means zero camera-permission delay when the user clicks "Start Omingle".
  */
 function prewarmCamera() {
-  if (_prewarmPromise) return; // already warming
+  if (localStream && localStream.getTracks().every(t => t.readyState === "live")) {
+    return Promise.resolve(localStream);
+  }
+  if (_prewarmPromise) return _prewarmPromise; // already warming
+  if (getMediaSupportError()) return Promise.resolve(null);
   // Fast, low-res capture just to get the permission grant & stream ready
   _prewarmPromise = navigator.mediaDevices
     .getUserMedia({
@@ -629,23 +698,31 @@ function prewarmCamera() {
     })
     .then(stream => {
       localStream = stream;
-      localVideo.srcObject = stream;
-      localVideo.muted = true;
-      localVideo.setAttribute("playsinline", "");
-      localVideo.setAttribute("webkit-playsinline", "");
-      localVideo.play().catch(() => {});
+      attachLocalPreview(stream);
+      return stream;
     })
     .catch(() => {
       // Permission denied or no camera — silently ignore, setupLocalMedia handles the error toast
       _prewarmPromise = null;
+      return null;
     });
+  return _prewarmPromise;
 }
 
 async function setupLocalMedia() {
+  const mediaSupportError = getMediaSupportError();
+  if (mediaSupportError) {
+    throw new Error(mediaSupportError);
+  }
+
+  if (_prewarmPromise) {
+    try { await _prewarmPromise; } catch (_) {}
+  }
+
   // Reuse existing live stream (pre-warmed or already running)
   if (localStream && localStream.getTracks().every(t => t.readyState === "live")) {
-    localVideo.srcObject = localStream;
-    return;
+    attachLocalPreview(localStream);
+    return localStream;
   }
 
   // Quality ladder: start at 480p for speed → 360p → basic
@@ -690,16 +767,14 @@ async function setupLocalMedia() {
   if (!stream) throw new Error("Camera/mic access denied");
 
   localStream = stream;
-  localVideo.srcObject = stream;
-  localVideo.muted = true;
-  localVideo.setAttribute("playsinline", "");
-  localVideo.setAttribute("webkit-playsinline", "");
-  await localVideo.play().catch(() => {});
+  attachLocalPreview(stream);
+  return stream;
 }
 
 function stopLocalMedia() {
   if (localStream) localStream.getTracks().forEach(t => t.stop());
   localStream = null;
+  _prewarmPromise = null;
   localVideo.srcObject = null;
   isMuted = false;
   isCameraOff = false;
@@ -772,8 +847,10 @@ function buildPeerConnection() {
       remoteVideo.srcObject.addTrack(event.track);
     }
 
-    remoteVideo.setAttribute("playsinline", "");
-    remoteVideo.setAttribute("webkit-playsinline", "");
+    prepareRemoteVideo();
+    event.track.onunmute = () => {
+      ensureRemotePlayback("track-unmute").catch(() => {});
+    };
     ensureRemotePlayback("ontrack").catch(() => {});
   };
 
@@ -982,6 +1059,7 @@ async function startChatFlow() {
   const gender    = genderSelect.value;
   const mode      = getSelectedMode();
   const interests = parseInterests(interestsInput.value);
+  const mediaSupportError = mode === "video" ? getMediaSupportError() : "";
 
   startBtn.disabled = true;
   currentInterests = interests;
@@ -991,12 +1069,18 @@ async function startChatFlow() {
   // This 'pre-warms' the audio systems while the user's thumb is still on the button.
   try {
     if (!_relayAudioPlayCtx) {
-      _relayAudioPlayCtx = new AudioContext({ sampleRate: 16000 });
+      _relayAudioPlayCtx = createAudioContext({ sampleRate: 16000 });
       console.log("[Audio] Fallback playback pre-warmed");
     }
     if (_relayAudioPlayCtx.state === "suspended") _relayAudioPlayCtx.resume();
   } catch (e) {
     console.warn("Audio Context pre-warm failed:", e);
+  }
+
+  if (mediaSupportError) {
+    showToast(mediaSupportError, "danger", 6000);
+    startBtn.disabled = false;
+    return;
   }
 
   // Block start until camera is ready (Ironclad Guard)
@@ -1009,16 +1093,11 @@ async function startChatFlow() {
       startBtn.disabled = false;
       startBtn.querySelector(".btn-text").textContent = "Start Omingle";
     } catch (e) {
-      showToast("Camera failed. Please allow access.", "danger", 5000);
+      showToast(e?.message || "Camera failed. Please allow access.", "danger", 5000);
       startBtn.disabled = false;
       startBtn.querySelector(".btn-text").textContent = "Start Omingle";
       return;
     }
-  }
-
-  // Security Check: GUM requires HTTPS
-  if (location.protocol !== "https:" && location.hostname !== "localhost") {
-    showToast("⚠️ HTTPS Required for Video", "danger", 10000);
   }
 
   try {
