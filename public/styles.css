@@ -763,16 +763,39 @@ kbd {
   top: 14px;
   left: 14px;
   right: 14px;
-  z-index: 3;
+  z-index: 15;
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  font-size: 0.82rem;
-  font-weight: 600;
   text-shadow: 0 2px 8px rgba(0,0,0,0.6);
-  color: #fff;
+  pointer-events: none;
 }
 
-.video-card__status { color: var(--gold); }
+.conn-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(0,0,0,0.65);
+  backdrop-filter: blur(8px);
+  border-radius: var(--radius-full);
+  border: 1px solid rgba(255,255,255,0.15);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.conn-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #aaa;
+}
+
+.conn-dot.online  { background: var(--green); box-shadow: 0 0 8px var(--green-glow); }
+.conn-dot.relay   { background: var(--purple); box-shadow: 0 0 8px var(--purple-glow); }
+.conn-dot.offline { background: var(--danger); box-shadow: 0 0 8px var(--danger-glow); }
 
 .video-card video {
   width: 100%;

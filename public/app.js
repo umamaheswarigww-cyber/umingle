@@ -48,6 +48,18 @@ const cameraBtn    = document.getElementById("cameraBtn");
 const nextBtn      = document.getElementById("nextBtn");
 const endBtn       = document.getElementById("endBtn");
 const reportBtn    = document.getElementById("reportBtn");
+const connSignal   = document.getElementById("connSignal");
+const connLabel    = document.getElementById("connLabel");
+
+function updateConnStatus(type, text) {
+  if (!connSignal || !connLabel) return;
+  connLabel.textContent = text;
+  connSignal.className  = "conn-dot " + (
+    type === "online" ? "online" : 
+    type === "relay"  ? "relay"  : "offline"
+  );
+}
+
 
 const messages     = document.getElementById("messages");
 const messageInput = document.getElementById("messageInput");
@@ -108,6 +120,14 @@ function _startSocketRelay() {
   remoteVideo.parentElement?.appendChild(_relayRemoteCanvas);
   _relayRemoteCtx = _relayRemoteCanvas.getContext("2d");
   remotePlaceholder.classList.add("hidden");
+  
+  // Set explicit z-index to be on top of everything
+  _relayRemoteCanvas.style.zIndex = "10";
+  _relayRemoteCanvas.style.pointerEvents = "none";
+  updateConnStatus("relay", "Relay Mode");
+
+  // Keep canvas sized perfectly with the video (fixes mobile rotation offset)
+
 
   // Keep canvas sized perfectly with the video (fixes mobile rotation offset)
   const syncSize = () => {
@@ -711,15 +731,18 @@ function buildPeerConnection() {
     if (s === "connected" || s === "completed") {
       statusBadge.textContent = "Connected";
       statusBadge.classList.remove("searching");
+      updateConnStatus("online", "WebRTC");
     }
     if (s === "disconnected") {
       statusBadge.textContent = "Reconnecting…";
+      updateConnStatus("offline", "Signal Weak");
     }
     if (s === "failed") {
       console.warn("[ICE] Connection failed — forcing ICE restart with 'relay' policy...");
-      _doIceRestart(true); // pass 'true' to force relay policy
+      _doIceRestart(true);
     }
   };
+
 
 
   peerConnection.onconnectionstatechange = () => {
@@ -873,13 +896,29 @@ async function startChatFlow() {
     _relayAudioPlayCtx.resume().catch(() => {});
   }
 
-  try {
-    if (mode === "video") {
+  // Ironclad Guard: Wait for camera to be ACTIVE before matching
+  if (mode === "video") {
+    startBtn.disabled = true;
+    startBtn.querySelector(".btn-text").textContent = "Camera Warming Up...";
+    try {
       await setupLocalMedia();
-    } else {
-      stopLocalMedia();
+      startBtn.disabled = false;
+      startBtn.querySelector(".btn-text").textContent = "Start Omingle";
+    } catch (e) {
+      showToast("Camera failed. Please allow access.", "danger", 5000);
+      startBtn.disabled = false;
+      startBtn.querySelector(".btn-text").textContent = "Start Omingle";
+      return;
     }
+  }
 
+  // Security Check: GUM requires HTTPS
+  if (location.protocol !== "https:" && location.hostname !== "localhost") {
+    showToast("⚠️ HTTPS Required for Video", "danger", 10000);
+  }
+
+  try {
+    username = name;
     joinScreen.classList.add("hidden");
     chatScreen.classList.remove("hidden");
     messages.innerHTML = "";
@@ -889,13 +928,13 @@ async function startChatFlow() {
       ? "🎥 Searching for a video chat partner…"
       : "💬 Searching for a text chat partner…");
 
-    username = name;
     socket.emit("start-chat", { name, gender, mode, interests });
   } catch (err) {
-    showToast("Camera/mic permission required for video mode.", "danger");
+    console.error("Start chat error:", err);
     startBtn.disabled = false;
   }
 }
+
 
 // ── Send message ──────────────────────────────────────────
 function sendMessage() {
@@ -1051,28 +1090,25 @@ socket.on("matched", ({ strangerGender, strangerName, mode, sharedInterests: si 
       refreshIceServers(); // answerer pre-fetches fresh TURN creds too
     }
 
-    // ── Black-screen watchdog (offerer only — prevents ICE restart glare) ──
-    setTimeout(() => {
-      if (!isMatched || !peerConnection || !_isOfferer) return;
-      const notPlaying = remoteVideo.readyState < 2 || remoteVideo.videoWidth === 0;
-      const iceNotGood = peerConnection.iceConnectionState !== "connected" &&
-                         peerConnection.iceConnectionState !== "completed";
-      if (notPlaying && iceNotGood) {
-        console.warn("[watchdog] Remote video not playing after 6s — ICE restart");
-        showToast("Video connection slow, retrying…", "info", 3000);
-        _doIceRestart();
-      }
-    }, 6000);
-
-    // Second watchdog at 14s — HARD RESTART with 'relay' policy
+    // First watchdog at 8s — retry ICE restart
     setTimeout(() => {
       if (!isMatched || !peerConnection || !_isOfferer) return;
       if (remoteVideo.readyState < 2 || remoteVideo.videoWidth === 0) {
-        console.warn("[watchdog] Still black at 14s — FORCING RELAY POLICY");
-        _iceRestartPending = false;
-        _doIceRestart(true); // force relay
+        console.warn("[watchdog] Remote video not playing after 8s — ICE restart");
+        _doIceRestart();
       }
-    }, 14000);
+    }, 8000);
+
+    // Second watchdog at 18s — HARD RESTART with 'relay' policy
+    setTimeout(() => {
+      if (!isMatched || !peerConnection || !_isOfferer) return;
+      if (remoteVideo.readyState < 2 || remoteVideo.videoWidth === 0) {
+        console.warn("[watchdog] Still black at 18s — FORCING RELAY POLICY");
+        _iceRestartPending = false;
+        _doIceRestart(true);
+      }
+    }, 18000);
+
 
 
     // ── ABSOLUTE LAST RESORT: Socket.io relay at 22s ─────────────────────────

@@ -224,9 +224,13 @@
               <article id="remoteCard" class="video-card remote-card">
                 <div class="video-card__head">
                   <span id="remoteTag">Stranger</span>
-                  <span class="video-card__status">Omingle Live</span>
+                  <div id="connStatus" class="conn-status">
+                    <span id="connSignal" class="conn-dot"></span>
+                    <span id="connLabel">Connecting...</span>
+                  </div>
                 </div>
                 <video id="remoteVideo" autoplay playsinline></video>
+
                 <div class="video-placeholder" id="remotePlaceholder">
                   <div class="avatar-ring">
                     <span id="remoteInitial">?</span>
