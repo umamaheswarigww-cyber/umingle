@@ -18,9 +18,10 @@
  *   - Memory cap via NODE_OPTIONS env var or npm start script
  */
 
-const path    = require("path");
-const express = require("express");
-const http    = require("http");
+const path       = require("path");
+const express    = require("express");
+const http       = require("http");
+const compress   = require("compression");
 const { Server } = require("socket.io");
 
 const app    = express();
@@ -28,8 +29,22 @@ const server = http.createServer(app);
 
 const PORT = process.env.PORT || 3000;
 
-// ── Static files ──────────────────────────────────────────
-app.use(express.static(path.join(__dirname, "public")));
+// ── Middleware ────────────────────────────────────────────
+// Gzip all text responses — shrinks CSS/JS by ~70%, faster global load
+app.use(compress({ level: 6, threshold: 1024 }));
+
+// Static files with cache headers
+// HTML: no-cache so new deployments are picked up immediately
+// CSS/JS/fonts: 7-day browser cache for repeat visitors
+app.use(express.static(path.join(__dirname, "public"), {
+  setHeaders(res, filePath) {
+    if (filePath.endsWith(".html")) {
+      res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    } else if (/\.(css|js|woff2?|ttf|svg|png|jpg|webp)$/.test(filePath)) {
+      res.setHeader("Cache-Control", "public, max-age=604800"); // 7 days
+    }
+  }
+}));
 
 // ── Health-check endpoint (Render uses this) ──────────────
 app.get("/healthz", (_req, res) => res.json({ ok: true, users: users.size }));

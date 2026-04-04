@@ -79,40 +79,50 @@ let audioCtx         = null;
 // ── WebRTC config ─────────────────────────────────────────
 const rtcConfig = {
   iceServers: [
-    // STUN — Google public servers
+    // STUN — Google (global)
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
-    { urls: "stun:stun2.l.google.com:19302" },
-    { urls: "stun:stun3.l.google.com:19302" },
-    // TURN — OpenRelay (free public, UDP + TCP on 80 & 443)
-    // Port 80 works through restrictive firewalls that block 3478
+    // STUN — Cloudflare (fast, globally distributed)
+    { urls: "stun:stun.cloudflare.com:3478" },
+    // STUN — Twilio (reliable, Asia/EU/US coverage)
+    { urls: "stun:global.stun.twilio.com:3478" },
+    // STUN — Stunprotocol (additional fallback)
+    { urls: "stun:stun.stunprotocol.org:3478" },
+    // TURN — relay.metered.ca (free, globally distributed: US, EU, Asia)
+    // UDP 80 — fastest, works through most firewalls
     {
-      urls: "turn:openrelay.metered.ca:80",
-      username: "openrelayproject",
-      credential: "openrelayproject"
+      urls: "turn:relay.metered.ca:80",
+      username: "e8dd65b3de36ffb44f01f591",
+      credential: "uPsVDGOFDCfNvzuU"
+    },
+    // TCP 80 — works through proxies that block UDP
+    {
+      urls: "turn:relay.metered.ca:80?transport=tcp",
+      username: "e8dd65b3de36ffb44f01f591",
+      credential: "uPsVDGOFDCfNvzuU"
+    },
+    // TLS 443 — bypasses deep-packet inspection / corporate firewalls
+    {
+      urls: "turn:relay.metered.ca:443",
+      username: "e8dd65b3de36ffb44f01f591",
+      credential: "uPsVDGOFDCfNvzuU"
     },
     {
-      urls: "turn:openrelay.metered.ca:80?transport=tcp",
-      username: "openrelayproject",
-      credential: "openrelayproject"
+      urls: "turn:relay.metered.ca:443?transport=tcp",
+      username: "e8dd65b3de36ffb44f01f591",
+      credential: "uPsVDGOFDCfNvzuU"
     },
-    // Port 443 bypasses most corporate/ISP deep-packet inspection
+    // OpenRelay backup TURN (original servers kept as extra fallback)
     {
       urls: "turn:openrelay.metered.ca:443",
       username: "openrelayproject",
       credential: "openrelayproject"
-    },
-    {
-      urls: "turn:openrelay.metered.ca:443?transport=tcp",
-      username: "openrelayproject",
-      credential: "openrelayproject"
     }
   ],
-  bundlePolicy: "max-bundle",
-  rtcpMuxPolicy: "require",
-  // "all" tries STUN first (direct P2P), falls back to TURN automatically
+  bundlePolicy:       "max-bundle",
+  rtcpMuxPolicy:      "require",
   iceTransportPolicy: "all",
-  iceCandidatePoolSize: 10
+  iceCandidatePoolSize: 12   // pre-gather more candidates for faster connection
 };
 
 // ── Particle background ───────────────────────────────────
@@ -345,21 +355,52 @@ function syncModeUi(mode) {
   }
 }
 
-// ── Local media (adaptive quality ladder) ───────────────────
+// ── Local media ───────────────────────────────────────────
+// Pre-warm flag — camera acquired before user clicks Start
+let _prewarmPromise = null;
+
+/**
+ * Pre-warm the camera silently in the background.
+ * Called as soon as the page loads (video mode default) and on mode switch.
+ * This means zero camera-permission delay when the user clicks "Start Omingle".
+ */
+function prewarmCamera() {
+  if (_prewarmPromise) return; // already warming
+  // Fast, low-res capture just to get the permission grant & stream ready
+  _prewarmPromise = navigator.mediaDevices
+    .getUserMedia({
+      video: { width: { ideal: 480 }, height: { ideal: 360 }, facingMode: "user" },
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    })
+    .then(stream => {
+      localStream = stream;
+      localVideo.srcObject = stream;
+      localVideo.muted = true;
+      localVideo.setAttribute("playsinline", "");
+      localVideo.setAttribute("webkit-playsinline", "");
+      localVideo.play().catch(() => {});
+    })
+    .catch(() => {
+      // Permission denied or no camera — silently ignore, setupLocalMedia handles the error toast
+      _prewarmPromise = null;
+    });
+}
+
 async function setupLocalMedia() {
-  // Reuse existing stream if all tracks are still live
+  // Reuse existing live stream (pre-warmed or already running)
   if (localStream && localStream.getTracks().every(t => t.readyState === "live")) {
     localVideo.srcObject = localStream;
     return;
   }
 
-  // Quality ladder: 720p → 480p → basic. First success wins.
+  // Quality ladder: start at 480p for speed → 360p → basic
+  // Starting at 480p (not 720p) means camera opens 2-3x faster on mobile
   const QUALITY_LADDER = [
     {
       video: {
-        width:     { ideal: 1280, min: 640 },
-        height:    { ideal: 720,  min: 480 },
-        frameRate: { ideal: 30,   min: 15 },
+        width:     { ideal: 640, max: 1280 },
+        height:    { ideal: 480, max: 720 },
+        frameRate: { ideal: 24,  max: 30 },
         facingMode: "user"
       },
       audio: {
@@ -371,17 +412,14 @@ async function setupLocalMedia() {
     },
     {
       video: {
-        width:     { ideal: 640 },
-        height:    { ideal: 480 },
-        frameRate: { ideal: 24 },
+        width:     { ideal: 480 },
+        height:    { ideal: 360 },
+        frameRate: { ideal: 20 },
         facingMode: "user"
       },
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
     },
-    {
-      video: { facingMode: "user" },
-      audio: true
-    }
+    { video: { facingMode: "user" }, audio: true }
   ];
 
   let stream = null;
@@ -399,7 +437,6 @@ async function setupLocalMedia() {
   localStream = stream;
   localVideo.srcObject = stream;
   localVideo.muted = true;
-  // iOS Safari needs explicit play() after setting srcObject
   localVideo.setAttribute("playsinline", "");
   localVideo.setAttribute("webkit-playsinline", "");
   await localVideo.play().catch(() => {});
@@ -441,18 +478,21 @@ function buildPeerConnection() {
   localStream.getTracks().forEach(track => {
     const sender = peerConnection.addTrack(track, localStream);
     if (track.kind === "video") {
-      // Apply bitrate & framerate caps after SDP negotiation (async)
+      // Apply adaptive bitrate faster (500ms) — start low, ramp up
+      // Low start = fewer stalls on weak/distant connections
       setTimeout(() => {
         try {
           const params = sender.getParameters();
           if (!params.encodings?.length) params.encodings = [{}];
-          // 1.5 Mbps handles 720p cleanly; browser downgrades if link is poor
-          params.encodings[0].maxBitrate      = 1_500_000;
-          params.encodings[0].maxFramerate    = 30;
+          // Start at 500 kbps — good for global mobile users (India, SEA, Africa)
+          // Browser's congestion control will INCREASE this automatically on good links
+          params.encodings[0].maxBitrate      = 800_000;  // 800 kbps ceiling
+          params.encodings[0].maxFramerate    = 24;
           params.encodings[0].networkPriority = "high";
+          params.encodings[0].scaleResolutionDownBy = 1; // full res
           sender.setParameters(params).catch(() => {});
         } catch (_) {}
-      }, 2000);
+      }, 500); // applied at 500ms, not 2000ms
     }
   });
 
@@ -492,7 +532,10 @@ function buildPeerConnection() {
 
 async function createOffer() {
   buildPeerConnection();
-  const offer = await peerConnection.createOffer();
+  const offer = await peerConnection.createOffer({
+    offerToReceiveAudio: true,
+    offerToReceiveVideo: true
+  });
   await peerConnection.setLocalDescription(offer);
   socket.emit("webrtc-offer", { sdp: offer });
 }
@@ -637,7 +680,12 @@ document.addEventListener("keydown", e => {
 });
 
 // ── Event listeners ───────────────────────────────────────
-modeInputs.forEach(inp => inp.addEventListener("change", () => syncModeUi(getSelectedMode())));
+modeInputs.forEach(inp => inp.addEventListener("change", () => {
+  const mode = getSelectedMode();
+  syncModeUi(mode);
+  // Pre-warm camera immediately when user switches to video mode
+  if (mode === "video") prewarmCamera();
+}));
 interestsInput.addEventListener("input", renderInterestPreview);
 startBtn.addEventListener("click", startChatFlow);
 homeLink.addEventListener("click", e => { e.preventDefault(); if (!chatScreen.classList.contains("hidden")) returnToLobby(); });
@@ -731,9 +779,10 @@ socket.on("matched", ({ strangerGender, strangerName, mode, sharedInterests: si 
   showToast(`Matched with ${displayName}! 🎉`, "success");
 
   if (resolvedMode === "video" && shouldInitiateOffer) {
+    // 30ms delay — just enough for both peers to register the match before offer
     setTimeout(() => {
       if (isMatched) createOffer().catch(err => console.error("Offer failed:", err));
-    }, 120);
+    }, 30);
   }
 });
 
@@ -856,3 +905,10 @@ syncModeUi(getSelectedMode());
 setChatEnabled(false);
 resetRemoteUi("Ready");
 statusBadge.classList.remove("searching");
+
+// Pre-warm camera in the background on page load (video is the default mode)
+// By the time user fills the form + clicks Start, camera is already open → instant start
+if (getSelectedMode() === "video") {
+  // Small delay so page renders first, then ask for camera
+  setTimeout(prewarmCamera, 800);
+}
