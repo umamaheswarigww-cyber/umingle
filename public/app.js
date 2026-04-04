@@ -79,42 +79,33 @@ let audioCtx         = null;
 // ── WebRTC config ─────────────────────────────────────────
 const rtcConfig = {
   iceServers: [
-    // STUN — Google (global)
+    // STUN — Global reliable STUN servers
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
-    // STUN — Cloudflare (fast, globally distributed)
     { urls: "stun:stun.cloudflare.com:3478" },
-    // STUN — Twilio (reliable, Asia/EU/US coverage)
     { urls: "stun:global.stun.twilio.com:3478" },
-    // STUN — Stunprotocol (additional fallback)
-    { urls: "stun:stun.stunprotocol.org:3478" },
-    // TURN — relay.metered.ca (free, globally distributed: US, EU, Asia)
-    // UDP 80 — fastest, works through most firewalls
+
+    // TURN — Metered.ca OpenRelay (Reliable for mobile NAT traversal)
+    // 80/UDP is fastest/standard
     {
-      urls: "turn:relay.metered.ca:80",
-      username: "e8dd65b3de36ffb44f01f591",
-      credential: "uPsVDGOFDCfNvzuU"
+      urls: "turn:openrelay.metered.ca:80",
+      username: "openrelayproject",
+      credential: "openrelayproject"
     },
-    // TCP 80 — works through proxies that block UDP
+    // 80/TCP for restrictive firewalls
     {
-      urls: "turn:relay.metered.ca:80?transport=tcp",
-      username: "e8dd65b3de36ffb44f01f591",
-      credential: "uPsVDGOFDCfNvzuU"
+      urls: "turn:openrelay.metered.ca:80?transport=tcp",
+      username: "openrelayproject",
+      credential: "openrelayproject"
     },
-    // TLS 443 — bypasses deep-packet inspection / corporate firewalls
-    {
-      urls: "turn:relay.metered.ca:443",
-      username: "e8dd65b3de36ffb44f01f591",
-      credential: "uPsVDGOFDCfNvzuU"
-    },
-    {
-      urls: "turn:relay.metered.ca:443?transport=tcp",
-      username: "e8dd65b3de36ffb44f01f591",
-      credential: "uPsVDGOFDCfNvzuU"
-    },
-    // OpenRelay backup TURN (original servers kept as extra fallback)
+    // 443/TLS to bypass Deep Packet Inspection (DPI)
     {
       urls: "turn:openrelay.metered.ca:443",
+      username: "openrelayproject",
+      credential: "openrelayproject"
+    },
+    {
+      urls: "turn:openrelay.metered.ca:443?transport=tcp",
       username: "openrelayproject",
       credential: "openrelayproject"
     }
@@ -122,7 +113,7 @@ const rtcConfig = {
   bundlePolicy:       "max-bundle",
   rtcpMuxPolicy:      "require",
   iceTransportPolicy: "all",
-  iceCandidatePoolSize: 12   // pre-gather more candidates for faster connection
+  iceCandidatePoolSize: 4    // Standard for mobile; avoids buffer bloat
 };
 
 // ── Particle background ───────────────────────────────────
@@ -498,16 +489,17 @@ function buildPeerConnection() {
 
   // Prefer VP9 (better quality/compression) then H264, then fallback
   peerConnection.ontrack = event => {
-    const [stream] = event.streams;
-    if (stream) {
-      stream.getTracks().forEach(t => {
-        if (!remoteStream.getTracks().some(r => r.id === t.id)) remoteStream.addTrack(t);
-      });
+    // Mobile fix: ensure we have a stream and it's active
+    const streams = event.streams;
+    if (streams && streams[0]) {
+      remoteVideo.srcObject = streams[0];
     } else {
-      remoteStream.addTrack(event.track);
+      // Fallback for some browsers that only pass tracks
+      if (!remoteVideo.srcObject) remoteVideo.srcObject = new MediaStream();
+      remoteVideo.srcObject.addTrack(event.track);
     }
-    remoteVideo.srcObject = remoteStream;
-    // iOS Safari requires playsinline + explicit play
+
+    // Ensure playsinline for mobile browsers
     remoteVideo.setAttribute("playsinline", "");
     remoteVideo.setAttribute("webkit-playsinline", "");
     remoteVideo.play().catch(() => {});
@@ -614,6 +606,13 @@ async function startChatFlow() {
   startBtn.disabled = true;
   currentInterests = interests;
   syncModeUi(mode);
+
+  // ── USER GESTURE BLESSING ─────────────────────────────────
+  // iOS/Android require a user gesture to play video elements.
+  // Calling .play() here "blesses" them so they can autoplay
+  // the incoming WebRTC streams later without another click.
+  localVideo.play().catch(() => {});
+  remoteVideo.play().catch(() => {});
 
   try {
     if (mode === "video") {
