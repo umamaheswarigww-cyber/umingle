@@ -79,41 +79,26 @@ let audioCtx         = null;
 // ── WebRTC config ─────────────────────────────────────────
 const rtcConfig = {
   iceServers: [
-    // STUN — Global reliable STUN servers
+    // ── STUN servers (P2P, free, global) ─────────────────────────────────
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
     { urls: "stun:stun.cloudflare.com:3478" },
-    { urls: "stun:global.stun.twilio.com:3478" },
 
-    // TURN — Metered.ca OpenRelay (Reliable for mobile NAT traversal)
-    // 80/UDP is fastest/standard
-    {
-      urls: "turn:openrelay.metered.ca:80",
-      username: "openrelayproject",
-      credential: "openrelayproject"
-    },
-    // 80/TCP for restrictive firewalls
-    {
-      urls: "turn:openrelay.metered.ca:80?transport=tcp",
-      username: "openrelayproject",
-      credential: "openrelayproject"
-    },
-    // 443/TLS to bypass Deep Packet Inspection (DPI)
-    {
-      urls: "turn:openrelay.metered.ca:443",
-      username: "openrelayproject",
-      credential: "openrelayproject"
-    },
-    {
-      urls: "turn:openrelay.metered.ca:443?transport=tcp",
-      username: "openrelayproject",
-      credential: "openrelayproject"
-    }
+    // ── TURN servers (relay, ESSENTIAL for mobile internet / CGNAT) ──────
+    // FreeTURN — reliable, dedicated free TURN server
+    { urls: "turn:freeturn.net:3479",         username: "free", credential: "free" },
+    { urls: "turn:freeturn.net:5349",         username: "free", credential: "free" },  // TLS
+
+    // OpenRelay (metered.ca) — backup TURN, multiple ports/protocols
+    { urls: "turn:openrelay.metered.ca:80",              username: "openrelayproject", credential: "openrelayproject" },
+    { urls: "turn:openrelay.metered.ca:80?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+    { urls: "turn:openrelay.metered.ca:443",              username: "openrelayproject", credential: "openrelayproject" },
+    { urls: "turn:openrelay.metered.ca:443?transport=tcp",username: "openrelayproject", credential: "openrelayproject" },
   ],
-  bundlePolicy:       "max-bundle",
-  rtcpMuxPolicy:      "require",
-  iceTransportPolicy: "all",
-  iceCandidatePoolSize: 4    // Standard for mobile; avoids buffer bloat
+  bundlePolicy:         "max-bundle",
+  rtcpMuxPolicy:        "require",
+  iceTransportPolicy:   "all",
+  iceCandidatePoolSize: 10
 };
 
 // ── Particle background ───────────────────────────────────
@@ -461,48 +446,42 @@ function buildPeerConnection() {
   if (!localStream) throw new Error("No local stream");
   closePeerConnection();
 
-  const remoteStream = new MediaStream();
-  remoteVideo.srcObject = remoteStream;
+  // NOTE: Do NOT pre-assign an empty MediaStream to remoteVideo.srcObject here.
+  // Setting srcObject to an empty stream can freeze mobile browser video rendering.
+  // We set it only when real tracks arrive in ontrack.
 
   peerConnection = new RTCPeerConnection(rtcConfig);
 
   localStream.getTracks().forEach(track => {
     const sender = peerConnection.addTrack(track, localStream);
     if (track.kind === "video") {
-      // Apply adaptive bitrate faster (500ms) — start low, ramp up
-      // Low start = fewer stalls on weak/distant connections
       setTimeout(() => {
         try {
           const params = sender.getParameters();
           if (!params.encodings?.length) params.encodings = [{}];
-          // Start at 500 kbps — good for global mobile users (India, SEA, Africa)
-          // Browser's congestion control will INCREASE this automatically on good links
-          params.encodings[0].maxBitrate      = 800_000;  // 800 kbps ceiling
+          params.encodings[0].maxBitrate      = 800_000;
           params.encodings[0].maxFramerate    = 24;
           params.encodings[0].networkPriority = "high";
-          params.encodings[0].scaleResolutionDownBy = 1; // full res
+          params.encodings[0].scaleResolutionDownBy = 1;
           sender.setParameters(params).catch(() => {});
         } catch (_) {}
-      }, 500); // applied at 500ms, not 2000ms
+      }, 500);
     }
   });
 
-  // Prefer VP9 (better quality/compression) then H264, then fallback
   peerConnection.ontrack = event => {
-    // Mobile fix: ensure we have a stream and it's active
-    const streams = event.streams;
-    if (streams && streams[0]) {
-      remoteVideo.srcObject = streams[0];
+    const inStream = (event.streams && event.streams[0]) || null;
+    if (inStream) {
+      // Only replace srcObject if we don’t already have this stream playing
+      if (remoteVideo.srcObject !== inStream) remoteVideo.srcObject = inStream;
     } else {
-      // Fallback for some browsers that only pass tracks
+      // Some mobile browsers only give track, no stream reference
       if (!remoteVideo.srcObject) remoteVideo.srcObject = new MediaStream();
       remoteVideo.srcObject.addTrack(event.track);
     }
-
-    // Ensure playsinline for mobile browsers
     remoteVideo.setAttribute("playsinline", "");
     remoteVideo.setAttribute("webkit-playsinline", "");
-    remoteVideo.play().catch(() => {});
+    if (remoteVideo.paused) remoteVideo.play().catch(() => {});
     remotePlaceholder.classList.add("hidden");
   };
 
@@ -510,16 +489,52 @@ function buildPeerConnection() {
     if (event.candidate) socket.emit("webrtc-ice-candidate", { candidate: event.candidate });
   };
 
-  peerConnection.onconnectionstatechange = () => {
+  // ── ICE connection state — fires reliably on mobile (unlike connectionstatechange) ──
+  peerConnection.oniceconnectionstatechange = () => {
     if (!peerConnection) return;
-    const state = peerConnection.connectionState;
-    if (state === "connected") {
+    const s = peerConnection.iceConnectionState;
+    console.log("[ICE]", s);
+    if (s === "connected" || s === "completed") {
       statusBadge.textContent = "Connected";
       statusBadge.classList.remove("searching");
     }
-    if (state === "failed")       peerConnection.restartIce();
-    if (state === "disconnected") statusBadge.textContent = "Reconnecting…";
+    if (s === "disconnected") {
+      statusBadge.textContent = "Reconnecting…";
+    }
+    if (s === "failed") {
+      // Initiate a proper ICE restart: create new offer with iceRestart flag
+      // This is more reliable than restartIce() which doesn’t resend an offer
+      _doIceRestart();
+    }
   };
+
+  peerConnection.onconnectionstatechange = () => {
+    if (!peerConnection) return;
+    const s = peerConnection.connectionState;
+    if (s === "connected") {
+      statusBadge.textContent = "Connected";
+      statusBadge.classList.remove("searching");
+    }
+    if (s === "disconnected") statusBadge.textContent = "Reconnecting…";
+  };
+}
+
+// Proper ICE restart — creates a new offer with iceRestart:true and sends it to the peer.
+// Must be called only by the original offerer to avoid glare.
+let _iceRestartPending = false;
+async function _doIceRestart() {
+  if (!peerConnection || !isMatched || _iceRestartPending) return;
+  _iceRestartPending = true;
+  console.warn("[ICE] Restarting ICE via new offer…");
+  try {
+    const offer = await peerConnection.createOffer({ iceRestart: true });
+    await peerConnection.setLocalDescription(offer);
+    socket.emit("webrtc-offer", { sdp: peerConnection.localDescription });
+  } catch (e) {
+    console.error("[ICE restart]", e);
+  } finally {
+    setTimeout(() => { _iceRestartPending = false; }, 4000); // cooldown
+  }
 }
 
 async function createOffer() {
@@ -533,13 +548,37 @@ async function createOffer() {
 }
 
 async function handleOffer(sdp) {
+  // ── ICE restart detection ─────────────────────────────────────────
+  // If we already have an active peer connection, this is likely an ICE restart offer.
+  // CRITICAL: Do NOT call buildPeerConnection() here — that would destroy the PC
+  // and all its media senders, breaking video for both users.
+  if (peerConnection && peerConnection.signalingState !== "closed") {
+    try {
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
+      for (const c of pendingCandidates) {
+        await peerConnection.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
+      }
+      pendingCandidates = [];
+      const answer = await peerConnection.createAnswer();
+      await peerConnection.setLocalDescription(answer);
+      socket.emit("webrtc-answer", { sdp: peerConnection.localDescription });
+      return;
+    } catch (e) {
+      console.warn("[handleOffer] ICE restart update failed, rebuilding PC:", e.message);
+      // Fall through to full rebuild below
+    }
+  }
+
+  // Fresh connection — build a new peer connection
   buildPeerConnection();
   await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
-  for (const c of pendingCandidates) await peerConnection.addIceCandidate(new RTCIceCandidate(c));
+  for (const c of pendingCandidates) {
+    await peerConnection.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
+  }
   pendingCandidates = [];
   const answer = await peerConnection.createAnswer();
   await peerConnection.setLocalDescription(answer);
-  socket.emit("webrtc-answer", { sdp: answer });
+  socket.emit("webrtc-answer", { sdp: peerConnection.localDescription });
 }
 
 async function handleAnswer(sdp) {
@@ -778,10 +817,41 @@ socket.on("matched", ({ strangerGender, strangerName, mode, sharedInterests: si 
   showToast(`Matched with ${displayName}! 🎉`, "success");
 
   if (resolvedMode === "video" && shouldInitiateOffer) {
+    // Reset ICE restart flag for fresh match
+    _iceRestartPending = false;
     // 30ms delay — just enough for both peers to register the match before offer
     setTimeout(() => {
       if (isMatched) createOffer().catch(err => console.error("Offer failed:", err));
     }, 30);
+  }
+
+  if (resolvedMode === "video") {
+    // ── Black-screen watchdog ────────────────────────────────────────────────
+    // After 6s, if remote video hasn't started rendering, force an ICE restart.
+    // This catches silent TURN failures where ICE state never explicitly says "failed".
+    setTimeout(() => {
+      if (!isMatched || !peerConnection) return;
+      const notPlaying = remoteVideo.readyState < 2 || remoteVideo.videoWidth === 0;
+      const iceNotGood = peerConnection.iceConnectionState !== "connected" &&
+                         peerConnection.iceConnectionState !== "completed";
+      if (notPlaying && iceNotGood) {
+        console.warn("[watchdog] Remote video not playing after 6s — forcing ICE restart");
+        showToast("Video connection slow, retrying…", "info", 3000);
+        _doIceRestart();
+      }
+    }, 6000);
+
+    // Second watchdog at 14s — if still black after first restart attempt
+    setTimeout(() => {
+      if (!isMatched || !peerConnection) return;
+      const stillBlack = remoteVideo.readyState < 2 || remoteVideo.videoWidth === 0;
+      if (stillBlack) {
+        console.warn("[watchdog] Still black after 14s — hard rebuild");
+        showToast("Video reconnecting…", "info", 3000);
+        _iceRestartPending = false;
+        _doIceRestart();
+      }
+    }, 14000);
   }
 });
 
