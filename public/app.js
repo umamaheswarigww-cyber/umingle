@@ -109,6 +109,18 @@ function _startSocketRelay() {
   _relayRemoteCtx = _relayRemoteCanvas.getContext("2d");
   remotePlaceholder.classList.add("hidden");
 
+  // Keep canvas sized perfectly with the video (fixes mobile rotation offset)
+  const syncSize = () => {
+    const rect = remoteVideo.getBoundingClientRect();
+    _relayRemoteCanvas.style.width  = rect.width  + "px";
+    _relayRemoteCanvas.style.height = rect.height + "px";
+    _relayRemoteCanvas.style.top    = remoteVideo.offsetTop  + "px";
+    _relayRemoteCanvas.style.left   = remoteVideo.offsetLeft + "px";
+  };
+  window.addEventListener("resize", syncSize);
+  syncSize();
+
+
   // \u2500\u2500 Local video capture \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   _relayCanvas = document.createElement("canvas");
   _relayCanvas.width  = 320;
@@ -656,13 +668,18 @@ function buildPeerConnection() {
   peerConnection.ontrack = event => {
     const inStream = (event.streams && event.streams[0]) || null;
     if (inStream) {
-      // Only replace srcObject if we don’t already have this stream playing
-      if (remoteVideo.srcObject !== inStream) remoteVideo.srcObject = inStream;
+      if (remoteVideo.srcObject !== inStream) {
+        console.log("[WebRTC] Remote stream attached");
+        remoteVideo.srcObject = inStream;
+      }
     } else {
-      // Some mobile browsers only give track, no stream reference
-      if (!remoteVideo.srcObject) remoteVideo.srcObject = new MediaStream();
+      if (!remoteVideo.srcObject) {
+        console.log("[WebRTC] Creating new MediaStream for track");
+        remoteVideo.srcObject = new MediaStream();
+      }
       remoteVideo.srcObject.addTrack(event.track);
     }
+
     remoteVideo.setAttribute("playsinline", "");
     remoteVideo.setAttribute("webkit-playsinline", "");
     if (remoteVideo.paused) remoteVideo.play().catch(() => {});
@@ -699,11 +716,11 @@ function buildPeerConnection() {
       statusBadge.textContent = "Reconnecting…";
     }
     if (s === "failed") {
-      // Initiate a proper ICE restart: create new offer with iceRestart flag
-      // This is more reliable than restartIce() which doesn’t resend an offer
-      _doIceRestart();
+      console.warn("[ICE] Connection failed — forcing ICE restart with 'relay' policy...");
+      _doIceRestart(true); // pass 'true' to force relay policy
     }
   };
+
 
   peerConnection.onconnectionstatechange = () => {
     if (!peerConnection) return;
@@ -717,17 +734,17 @@ function buildPeerConnection() {
 }
 
 // Proper ICE restart — creates a new offer with iceRestart:true and sends it to the peer.
-// ONLY the original offerer (_isOfferer===true) does this to prevent offer glare.
-// Glare = both sides simultaneously send offers, creating signalingState conflicts.
 let _iceRestartPending = false;
-async function _doIceRestart() {
+async function _doIceRestart(forceRelay = false) {
   if (!peerConnection || !isMatched || _iceRestartPending) return;
-  if (!_isOfferer) {
-    console.log("[ICE restart] Skipped — this peer is the answerer; waiting for offerer's restart offer");
-    return;
+  if (!_isOfferer) return;
+
+  if (forceRelay) {
+    console.warn("[ICE] HARD RESTART: Forcing relay-only transport policy");
+    rtcConfig.iceTransportPolicy = "relay";
   }
+
   _iceRestartPending = true;
-  console.warn("[ICE] Restarting ICE via new offer…");
   try {
     const offer = await peerConnection.createOffer({ iceRestart: true });
     await peerConnection.setLocalDescription(offer);
@@ -739,9 +756,11 @@ async function _doIceRestart() {
   }
 }
 
+
 async function createOffer() {
-  // Always fetch fresh TURN credentials before creating a new peer connection
   await refreshIceServers();
+  // Reset policy to 'all' for new match start
+  rtcConfig.iceTransportPolicy = "all";
   _isOfferer = true;
   buildPeerConnection();
   const offer = await peerConnection.createOffer({
@@ -753,32 +772,27 @@ async function createOffer() {
 }
 
 async function handleOffer(sdp) {
-  // ── ICE restart detection ─────────────────────────────────────────
-  // If a peer connection already exists, this is an ICE restart offer from the offerer.
-  // CRITICAL: Do NOT call buildPeerConnection() — that destroys the PC and all senders.
   if (peerConnection && peerConnection.signalingState !== "closed") {
     try {
       await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
-      for (const c of pendingCandidates) {
-        await peerConnection.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
-      }
+      for (const c of pendingCandidates) await peerConnection.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
       pendingCandidates = [];
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
       socket.emit("webrtc-answer", { sdp: peerConnection.localDescription });
       return;
     } catch (e) {
-      console.warn("[handleOffer] ICE restart handling failed, doing full rebuild:", e.message);
+      console.warn("[handleOffer] ICE restart handling failure:", e.message);
     }
   }
 
-  // First offer — answerer role; build a fresh peer connection
+  // Answerer: wait for fresh TURN servers so we have the best path ready
+  await refreshIceServers();
+  rtcConfig.iceTransportPolicy = "all"; 
   _isOfferer = false;
   buildPeerConnection();
   await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
-  for (const c of pendingCandidates) {
-    await peerConnection.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
-  }
+  for (const c of pendingCandidates) await peerConnection.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
   pendingCandidates = [];
   const answer = await peerConnection.createAnswer();
   await peerConnection.setLocalDescription(answer);
@@ -1050,14 +1064,16 @@ socket.on("matched", ({ strangerGender, strangerName, mode, sharedInterests: si 
       }
     }, 6000);
 
+    // Second watchdog at 14s — HARD RESTART with 'relay' policy
     setTimeout(() => {
       if (!isMatched || !peerConnection || !_isOfferer) return;
       if (remoteVideo.readyState < 2 || remoteVideo.videoWidth === 0) {
-        console.warn("[watchdog] Still black at 14s — retry ICE restart");
+        console.warn("[watchdog] Still black at 14s — FORCING RELAY POLICY");
         _iceRestartPending = false;
-        _doIceRestart();
+        _doIceRestart(true); // force relay
       }
     }, 14000);
+
 
     // ── ABSOLUTE LAST RESORT: Socket.io relay at 22s ─────────────────────────
     // Fires for BOTH sides (no glare risk — relay is just capture+send).

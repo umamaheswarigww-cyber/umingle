@@ -56,15 +56,22 @@ const STATIC_ICE = [
   { urls: "stun:stun.l.google.com:19302"  },
   { urls: "stun:stun1.l.google.com:19302" },
   { urls: "stun:stun.cloudflare.com:3478" },
+  
   // TURN — FreeTURN (dedicated free TURN server)
   { urls: "turn:freeturn.net:3479", username: "free", credential: "free" },
   { urls: "turn:freeturn.net:5349", username: "free", credential: "free" },
-  // TURN — OpenRelay via metered.ca (backup, multiple ports/protocols)
-  { urls: "turn:openrelay.metered.ca:80",               username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turn:openrelay.metered.ca:80?transport=tcp",  username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turn:openrelay.metered.ca:443",               username: "openrelayproject", credential: "openrelayproject" },
+
+  // TURN — OpenRelay / Global Relay via metered.ca (Backup list)
+  // TLS (Turns 443) — Best for bypassing firewalls
+  { urls: "turns:openrelay.metered.ca:443",              username: "openrelayproject", credential: "openrelayproject" },
+  // TCP 443 — Standard HTTPS port
   { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+  // TCP 80 — Standard HTTP port
+  { urls: "turn:openrelay.metered.ca:80?transport=tcp",  username: "openrelayproject", credential: "openrelayproject" },
+  // UDP — Traditional WebRTC relay
+  { urls: "turn:openrelay.metered.ca:80",                username: "openrelayproject", credential: "openrelayproject" },
 ];
+
 
 let _iceCache = null;
 let _iceCacheTime = 0;
@@ -129,10 +136,11 @@ const io = new Server(server, {
   transports: ["websocket", "polling"],
   pingTimeout:        45000,
   pingInterval:       15000,
-  // 200 KB — large enough for JPEG video frames sent through Socket.io relay fallback
-  maxHttpBufferSize:  2e5,
+  // 1 MB — large packet buffer for high-latency mobile/VPN socket.io relay traffic
+  maxHttpBufferSize:  1e6,
   cors: { origin: "*", methods: ["GET", "POST"] }
 });
+
 
 // ── In-memory state ───────────────────────────────────────
 // All users are in ONE shared pool → true random matching across everyone.
