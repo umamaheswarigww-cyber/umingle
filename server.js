@@ -126,14 +126,12 @@ app.get("/api/ice-servers", async (_req, res) => {
 
 // ── Socket.IO ─────────────────────────────────────────────
 const io = new Server(server, {
-  transports: ["websocket", "polling"],   // polling fallback for strict firewalls
-  pingTimeout:        45000,   // 45s — tolerate mobile network pauses (screen lock, 4G handover)
-  pingInterval:       15000,   // 15s heartbeat
-  maxHttpBufferSize:  1e5,               // 100 KB max payload
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  }
+  transports: ["websocket", "polling"],
+  pingTimeout:        45000,
+  pingInterval:       15000,
+  // 200 KB — large enough for JPEG video frames sent through Socket.io relay fallback
+  maxHttpBufferSize:  2e5,
+  cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
 // ── In-memory state ───────────────────────────────────────
@@ -454,6 +452,35 @@ io.on("connection", (socket) => {
     if (!user || user.mode !== "video" || !user.partnerId || !candidate) return;
     io.to(user.partnerId).emit("webrtc-ice-candidate", { candidate });
   });
+
+  // ── Socket.io media relay fallback ───────────────────────
+  // Activated on the client when WebRTC ICE fails (mobile internet, VPN, strict NAT).
+  // Works on ANY network — just TCP/WebSocket over HTTPS port 443.
+  // Rate-limited to prevent abuse.
+
+  let _lastVideoRelay = 0;
+  let _lastAudioRelay = 0;
+
+  socket.on("relay-video-frame", (frame) => {
+    const user = users.get(socket.id);
+    if (!user?.partnerId) return;
+    // Max 30 frames/sec to prevent flooding
+    const now = Date.now();
+    if (now - _lastVideoRelay < 33) return;
+    _lastVideoRelay = now;
+    io.to(user.partnerId).emit("relay-video-frame", frame);
+  });
+
+  socket.on("relay-audio-chunk", (chunk) => {
+    const user = users.get(socket.id);
+    if (!user?.partnerId) return;
+    // Max 50 audio chunks/sec
+    const now = Date.now();
+    if (now - _lastAudioRelay < 20) return;
+    _lastAudioRelay = now;
+    io.to(user.partnerId).emit("relay-audio-chunk", chunk);
+  });
+
 
   // ── disconnect ────────────────────────────────────────
   socket.on("disconnect", () => {

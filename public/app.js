@@ -77,6 +77,129 @@ let typingTimeout    = null;
 let audioCtx         = null;
 let _isOfferer       = false; // tracks which peer sent the original WebRTC offer
 
+// ── Socket.io media relay fallback ────────────────────────
+// Used when WebRTC ICE fails on mobile internet, VPN, or restrictive networks.
+// Relay works on 100% of networks (pure TCP/WebSocket over HTTPS port 443).
+let _relayActive        = false;
+let _relayVideoInterval = null;
+let _relayAudioCapture  = null;
+let _relayAudioCtx      = null;
+let _relayCanvas        = null;
+let _relayRemoteCanvas  = null;
+let _relayRemoteCtx     = null;
+
+function _startSocketRelay() {
+  if (_relayActive) return;
+  _relayActive = true;
+  console.warn("[relay] WebRTC failed — switching to Socket.io media relay");
+  showToast("Using relay mode (video quality reduced)", "info", 5000);
+
+  // \u2500\u2500 Remote video: draw incoming JPEG frames onto a canvas overlay \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  _relayRemoteCanvas = document.createElement("canvas");
+  _relayRemoteCanvas.width  = 320;
+  _relayRemoteCanvas.height = 240;
+  Object.assign(_relayRemoteCanvas.style, {
+    position: "absolute", inset: "0", width: "100%", height: "100%",
+    objectFit: "cover", zIndex: "2", background: "#000"
+  });
+  // Insert into remote video card
+  const remoteCard = document.getElementById("remoteCard");
+  if (remoteCard) remoteCard.style.position = "relative";
+  remoteVideo.parentElement?.appendChild(_relayRemoteCanvas);
+  _relayRemoteCtx = _relayRemoteCanvas.getContext("2d");
+  remotePlaceholder.classList.add("hidden");
+
+  // \u2500\u2500 Local video capture \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  _relayCanvas = document.createElement("canvas");
+  _relayCanvas.width  = 320;
+  _relayCanvas.height = 240;
+  const captureCtx = _relayCanvas.getContext("2d");
+
+  _relayVideoInterval = setInterval(() => {
+    if (!isMatched || !localVideo.srcObject) return;
+    try {
+      captureCtx.drawImage(localVideo, 0, 0, 320, 240);
+      _relayCanvas.toBlob(blob => {
+        if (!blob || !socket.connected || !isMatched) return;
+        blob.arrayBuffer().then(buf => socket.emit("relay-video-frame", buf));
+      }, "image/jpeg", 0.45);
+    } catch (_) {}
+  }, 67); // ~15 fps
+
+  // \u2500\u2500 Audio capture via Web Audio API \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  try {
+    const stream = localStream || localVideo.srcObject;
+    if (stream && stream.getAudioTracks().length > 0) {
+      _relayAudioCtx = new AudioContext({ sampleRate: 16000 }); // 16kHz is enough for voice
+      const src       = _relayAudioCtx.createMediaStreamSource(stream);
+      const processor = _relayAudioCtx.createScriptProcessor(1024, 1, 1);
+      src.connect(processor);
+      processor.connect(_relayAudioCtx.destination);
+      processor.onaudioprocess = (e) => {
+        if (!isMatched || !socket.connected) return;
+        const floats = e.inputBuffer.getChannelData(0);
+        // Convert float32 PCM → int16 for compact transmission (~2KB per chunk @ 16kHz)
+        const int16  = new Int16Array(floats.length);
+        for (let i = 0; i < floats.length; i++) {
+          int16[i] = Math.max(-32768, Math.min(32767, floats[i] * 32767));
+        }
+        socket.emit("relay-audio-chunk", int16.buffer);
+      };
+      _relayAudioCapture = processor;
+    }
+  } catch (e) {
+    console.warn("[relay audio]", e.message);
+  }
+}
+
+function _stopSocketRelay() {
+  if (!_relayActive) return;
+  _relayActive = false;
+  clearInterval(_relayVideoInterval);
+  _relayVideoInterval = null;
+  if (_relayAudioCapture) { try { _relayAudioCapture.disconnect(); } catch (_) {} }
+  if (_relayAudioCtx)    { try { _relayAudioCtx.close(); }         catch (_) {} }
+  _relayAudioCapture = null; _relayAudioCtx = null;
+  if (_relayRemoteCanvas) _relayRemoteCanvas.remove();
+  _relayRemoteCanvas = null; _relayRemoteCtx = null;
+  _relayCanvas = null;
+}
+
+// Receive remote video frames and draw on canvas overlay
+let _relayAudioPlayCtx = null;
+let _relayNextPlayTime  = 0;
+socket.on("relay-video-frame", (frame) => {
+  if (!_relayRemoteCtx) return;
+  const blob = new Blob([frame], { type: "image/jpeg" });
+  createImageBitmap(blob).then(bmp => {
+    _relayRemoteCtx.drawImage(bmp, 0, 0, 320, 240);
+    bmp.close();
+  }).catch(() => {});
+});
+
+// Receive remote audio chunks and schedule playback with minimal jitter
+socket.on("relay-audio-chunk", (chunk) => {
+  try {
+    if (!_relayAudioPlayCtx) {
+      _relayAudioPlayCtx = new AudioContext({ sampleRate: 16000 });
+      _relayNextPlayTime  = _relayAudioPlayCtx.currentTime;
+    }
+    const int16  = new Int16Array(chunk);
+    const floats = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) floats[i] = int16[i] / 32767;
+    const buf    = _relayAudioPlayCtx.createBuffer(1, floats.length, 16000);
+    buf.copyToChannel(floats, 0);
+    const src    = _relayAudioPlayCtx.createBufferSource();
+    src.buffer   = buf;
+    src.connect(_relayAudioPlayCtx.destination);
+    // Schedule slightly in the future to smooth jitter
+    const playAt = Math.max(_relayAudioPlayCtx.currentTime + 0.04, _relayNextPlayTime);
+    src.start(playAt);
+    _relayNextPlayTime = playAt + buf.duration;
+  } catch (_) {}
+});
+
+
 // ── WebRTC config ─────────────────────────────────────────
 // iceServers is populated dynamically from /api/ice-servers before each call.
 // Static fallback is included here so WebRTC can start even if the fetch fails.
@@ -453,6 +576,7 @@ function closePeerConnection() {
   pendingCandidates  = [];
   _isOfferer         = false;
   _iceRestartPending = false;
+  _stopSocketRelay();  // always clean up relay when chat ends
   if (peerConnection) {
     peerConnection.ontrack                 = null;
     peerConnection.onicecandidate          = null;
@@ -882,6 +1006,20 @@ socket.on("matched", ({ strangerGender, strangerName, mode, sharedInterests: si 
         _doIceRestart();
       }
     }, 14000);
+
+    // ── ABSOLUTE LAST RESORT: Socket.io relay at 22s ─────────────────────────
+    // Fires for BOTH sides (no glare risk — relay is just capture+send).
+    // If remote video is still black after 22s, WebRTC has completely failed.
+    // Switch to Socket.io relay which works on ANY network.
+    setTimeout(() => {
+      if (!isMatched) return;
+      const stillBlack = !_relayActive &&
+                         (remoteVideo.readyState < 2 || remoteVideo.videoWidth === 0);
+      if (stillBlack) {
+        console.warn("[watchdog] WebRTC totally failed at 22s — starting Socket.io relay");
+        _startSocketRelay();
+      }
+    }, 22000);
   }
 });
 
