@@ -4,12 +4,14 @@
 
 // ── Socket ────────────────────────────────────────────────
 const socket = io({
-  // WebSocket preferred; polling fallback for strict firewalls/corporate proxies
+  // Prefer WebSocket; fall back to polling for strict firewalls/mobile networks
   transports: ["websocket", "polling"],
-  // Reconnection
-  reconnectionDelay: 1000,
-  reconnectionDelayMax: 5000,
-  reconnectionAttempts: 10
+  // Reconnection — generous for Render.com cold starts (can take 30-60s)
+  reconnectionDelay:    1500,
+  reconnectionDelayMax: 8000,
+  reconnectionAttempts: 20,
+  // Timeout for each individual connection attempt
+  timeout: 20000
 });
 
 // ── DOM refs ──────────────────────────────────────────────
@@ -802,7 +804,10 @@ function _hideReconnectOverlay() {
 }
 
 socket.on("reconnect",         () => { _hideReconnectOverlay(); showToast("Reconnected! ✅", "success"); });
-socket.on("reconnect_attempt", () => { /* keep overlay visible while retrying */ });
+socket.on("reconnect_attempt", (n) => {
+  // After 5 failed attempts try switching to polling as fallback
+  if (n === 5) socket.io.opts.transports = ["polling", "websocket"];
+});
 socket.on("reconnect_failed",  () => {
   _hideReconnectOverlay();
   showToast("Could not reconnect. Please refresh.", "danger", 8000);
@@ -814,6 +819,36 @@ socket.on("connect", () => {
   _hideReconnectOverlay();
   startBtn.disabled = false; // re-enable in case it was stuck
 });
+
+// ── Page visibility — reconnect when phone wakes from sleep/background ──────
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    if (!socket.connected) {
+      socket.connect(); // force reconnect attempt immediately
+    }
+  }
+});
+
+// ── Safety net: auto-dismiss stuck reconnect overlay after 90s ───────────────
+let _reconnectKillTimer = null;
+
+socket.on("disconnect", () => {
+  // Kill timer if already running
+  clearTimeout(_reconnectKillTimer);
+  // After 90 s of failed reconnect, give up and return to lobby
+  _reconnectKillTimer = setTimeout(() => {
+    if (!socket.connected) {
+      _hideReconnectOverlay();
+      showToast("Connection lost. Please check your network.", "danger", 8000);
+      returnToLobby();
+    }
+  }, 90_000);
+});
+
+socket.on("connect", () => {
+  clearTimeout(_reconnectKillTimer);
+});
+
 
 // ── Init ──────────────────────────────────────────────────
 renderInterestPreview();

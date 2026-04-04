@@ -781,6 +781,20 @@ kbd {
   display: block;
 }
 
+/* Remote video (Stranger) — contain prevents portrait phone stream
+   from being cropped/zoomed on a landscape laptop screen */
+#remoteVideo {
+  object-fit: contain;
+  background: #000;
+}
+
+/* Local (self) preview — contain so face isn't cropped, mirror like a selfie camera */
+#localVideo {
+  object-fit: contain;
+  background: #000;
+  transform: scaleX(-1);
+}
+
 /* Video placeholder */
 .video-placeholder {
   position: absolute;
@@ -1221,12 +1235,23 @@ kbd {
 
   .screen-chat {
     position: fixed !important;
-    top: 0; left: 0; right: 0; bottom: 0;
+    /* Use small/dynamic viewport height — accounts for mobile browser chrome (URL bar, gestures) */
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    /* Fallback for older browsers */
+    height: 100vh;
+    /* Dynamic viewport — fills exactly the visible area on iOS/Android */
+    height: 100dvh;
     z-index: 100;
     overflow: hidden;
     display: flex !important;
     flex-direction: column;
     padding: 0;
+    /* Respect iOS safe areas */
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
     background: var(--bg);
   }
   .screen-chat.hidden { display: none !important; }
@@ -1281,9 +1306,10 @@ kbd {
   .video-stage {
     flex-shrink: 0;
     width: 100% !important;
-    height: 48vw;             /* portrait: taller than before */
+    /* Use viewport-relative height so it never overflows the screen */
+    height: 40vh;
     min-height: 200px !important;
-    max-height: 46vh;
+    max-height: 44vh;
     border-radius: 0;
     border-left:  none;
     border-right: none;
@@ -1291,6 +1317,7 @@ kbd {
     display: block;
     margin: 0;
     padding: 0;
+    position: relative;
   }
 
   /* Remote (Stranger) card — fill the full stage, no inset gap */
@@ -1354,10 +1381,11 @@ kbd {
   .control-btn:hover  { transform: none; }
   .control-btn:active { opacity: 0.75; }
 
-  /* ── MESSAGES PANEL — fills remaining space ── */
+  /* ── MESSAGES PANEL — fills remaining space, NO overflow beyond viewport ── */
   .messages-panel {
     flex: 1;
     min-height: 0;
+    max-height: none; /* override desktop max-height: 480px */
     border-radius: 0;
     border-left:  none;
     border-right: none;
@@ -1369,6 +1397,7 @@ kbd {
   /* Only messages scrolls */
   .messages {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
     overscroll-behavior-y: contain;
@@ -1393,17 +1422,21 @@ kbd {
   .emoji-bar::-webkit-scrollbar { display: none; }
   .emoji-btn { font-size: 1.25rem; min-width: 34px; min-height: 34px; }
 
-  /* Composer */
+  /* Composer — pinned at bottom, no extra gap */
   .composer {
     flex-shrink: 0;
     border-radius: 0;
     padding: 8px 10px;
-    padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    /* safe-area-inset-bottom already handled by screen-chat padding-bottom */
     gap: 8px;
+    margin-bottom: 0;
   }
   .composer input { font-size: 16px; min-height: 40px; }
   .send-btn       { width: 40px; height: 40px; }
   .char-count     { display: none; }
+
+  /* Eliminate any residual bottom gap inside screen-chat */
+  .screen-chat > * { flex-shrink: 0; }
 
   /* Toast */
   .toast-container { top: auto; bottom: 80px; right: 12px; }

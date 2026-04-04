@@ -37,8 +37,8 @@ app.get("/healthz", (_req, res) => res.json({ ok: true, users: users.size }));
 // ── Socket.IO ─────────────────────────────────────────────
 const io = new Server(server, {
   transports: ["websocket", "polling"],   // polling fallback for strict firewalls
-  pingTimeout:        20000,   // 20s — detect dead clients faster, free slots sooner
-  pingInterval:       10000,   // 10s — more frequent heartbeat
+  pingTimeout:        45000,   // 45s — tolerate mobile network pauses (screen lock, 4G handover)
+  pingInterval:       15000,   // 15s heartbeat
   maxHttpBufferSize:  1e5,               // 100 KB max payload
   cors: {
     origin: "*",
@@ -395,7 +395,7 @@ server.listen(PORT, () => {
       }).on("error", err => {
         console.warn("[keep-alive] failed:", err.message);
       });
-    }, 14 * 60 * 1000);
-    console.log(`   Keep-alive pinging ${pingUrl} every 14 min`);
+    }, 12 * 60 * 1000); // Every 12 min — before Render's 15-min sleep threshold
+    console.log(`   Keep-alive pinging ${pingUrl} every 12 min`);
   }
 });
