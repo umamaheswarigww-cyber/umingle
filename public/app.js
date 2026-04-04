@@ -151,6 +151,7 @@ function _startSocketRelay() {
     if (!isMatched || !localVideo.srcObject) return;
     try {
       captureCtx.drawImage(localVideo, 0, 0, 320, 240);
+      // Low-bandwidth mode: 0.3 quality is plenty for fallback (5-10KB per jpeg)
       _relayCanvas.toBlob(blob => {
         if (!blob || !socket.connected || !isMatched) return;
         blob.arrayBuffer().then(buf => {
@@ -158,9 +159,10 @@ function _startSocketRelay() {
           if (_relayFrameSendCount === 1) console.log("[relay] First video frame sent to partner");
           socket.emit("relay-video-frame", buf);
         });
-      }, "image/jpeg", 0.45);
+      }, "image/jpeg", 0.3);
     } catch (_) {}
-  }, 67); // ~15 fps
+  }, 125); // 8 fps — more stable on mobile networks
+
 
   // \u2500\u2500 Audio capture via Web Audio API \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   try {
@@ -237,16 +239,16 @@ socket.on("relay-video-frame", (frame) => {
 // Receive remote audio chunks and schedule playback with minimal jitter
 socket.on("relay-audio-chunk", (chunk) => {
   try {
-    // Ensure we have a running AudioContext (may need user gesture on mobile)
     if (!_relayAudioPlayCtx) {
       _relayAudioPlayCtx = new AudioContext({ sampleRate: 16000 });
       _relayNextPlayTime  = _relayAudioPlayCtx.currentTime + 0.1;
-      console.log("[relay] Audio playback context created");
     }
-    // Resume if suspended (mobile browser may suspend until interaction)
+    // NUCLEAR FIX: Always try to resume on every chunk (fails silent if already running)
+    // Helps bypass aggressive mobile power-saver/suspension.
     if (_relayAudioPlayCtx.state === "suspended") {
       _relayAudioPlayCtx.resume().catch(() => {});
     }
+
     // Coerce to ArrayBuffer regardless of Node.js Buffer vs ArrayBuffer
     const rawBuf = chunk instanceof ArrayBuffer ? chunk
                  : chunk.buffer ? chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength)
@@ -887,16 +889,20 @@ async function startChatFlow() {
   currentInterests = interests;
   syncModeUi(mode);
 
-  // iOS/Android require a user gesture to play video elements.
-  localVideo.play().catch(() => {});
-  remoteVideo.play().catch(() => {});
-
-  // Pre-unlock relay audio context if it exists
-  if (_relayAudioPlayCtx && _relayAudioPlayCtx.state === "suspended") {
-    _relayAudioPlayCtx.resume().catch(() => {});
+  // Start Audio Contexts EARLY (User Gesture Blessing)
+  // This 'pre-warms' the audio systems while the user's thumb is still on the button.
+  try {
+    if (!_relayAudioPlayCtx) {
+      _relayAudioPlayCtx = new AudioContext({ sampleRate: 16000 });
+      console.log("[Audio] Fallback playback pre-warmed");
+    }
+    if (_relayAudioPlayCtx.state === "suspended") _relayAudioPlayCtx.resume();
+  } catch (e) {
+    console.warn("Audio Context pre-warm failed:", e);
   }
 
-  // Ironclad Guard: Wait for camera to be ACTIVE before matching
+  // Block start until camera is ready (Ironclad Guard)
+
   if (mode === "video") {
     startBtn.disabled = true;
     startBtn.querySelector(".btn-text").textContent = "Camera Warming Up...";
@@ -1099,15 +1105,23 @@ socket.on("matched", ({ strangerGender, strangerName, mode, sharedInterests: si 
       }
     }, 8000);
 
-    // Second watchdog at 18s — HARD RESTART with 'relay' policy
+    // Second watchdog at 18s — HARD RESTART with 'relay' policy + Media Reset
     setTimeout(() => {
       if (!isMatched || !peerConnection || !_isOfferer) return;
       if (remoteVideo.readyState < 2 || remoteVideo.videoWidth === 0) {
-        console.warn("[watchdog] Still black at 18s — FORCING RELAY POLICY");
+        console.warn("[watchdog] Still black at 18s — FORCING RELAY + HARD MEDIA RESET");
+        
+        // Jiggle the camera hardware (sometimes mobile browsers get 'stuck' on older streams)
+        if (localStream) {
+          localVideo.srcObject = null;
+          setTimeout(() => { localVideo.srcObject = localStream; }, 50);
+        }
+
         _iceRestartPending = false;
         _doIceRestart(true);
       }
     }, 18000);
+
 
 
 
