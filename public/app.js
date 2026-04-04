@@ -75,31 +75,51 @@ let currentMode      = "video";
 let currentInterests = [];
 let typingTimeout    = null;
 let audioCtx         = null;
+let _isOfferer       = false; // tracks which peer sent the original WebRTC offer
 
 // ── WebRTC config ─────────────────────────────────────────
+// iceServers is populated dynamically from /api/ice-servers before each call.
+// Static fallback is included here so WebRTC can start even if the fetch fails.
 const rtcConfig = {
-  iceServers: [
-    // ── STUN servers (P2P, free, global) ─────────────────────────────────
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-    { urls: "stun:stun.cloudflare.com:3478" },
-
-    // ── TURN servers (relay, ESSENTIAL for mobile internet / CGNAT) ──────
-    // FreeTURN — reliable, dedicated free TURN server
-    { urls: "turn:freeturn.net:3479",         username: "free", credential: "free" },
-    { urls: "turn:freeturn.net:5349",         username: "free", credential: "free" },  // TLS
-
-    // OpenRelay (metered.ca) — backup TURN, multiple ports/protocols
-    { urls: "turn:openrelay.metered.ca:80",              username: "openrelayproject", credential: "openrelayproject" },
-    { urls: "turn:openrelay.metered.ca:80?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
-    { urls: "turn:openrelay.metered.ca:443",              username: "openrelayproject", credential: "openrelayproject" },
-    { urls: "turn:openrelay.metered.ca:443?transport=tcp",username: "openrelayproject", credential: "openrelayproject" },
-  ],
   bundlePolicy:         "max-bundle",
   rtcpMuxPolicy:        "require",
   iceTransportPolicy:   "all",
-  iceCandidatePoolSize: 10
+  iceCandidatePoolSize: 10,
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun.cloudflare.com:3478" },
+    { urls: "turn:freeturn.net:3479",  username: "free", credential: "free" },
+    { urls: "turn:freeturn.net:5349",  username: "free", credential: "free" },
+    { urls: "turn:openrelay.metered.ca:80",               username: "openrelayproject", credential: "openrelayproject" },
+    { urls: "turn:openrelay.metered.ca:80?transport=tcp",  username: "openrelayproject", credential: "openrelayproject" },
+    { urls: "turn:openrelay.metered.ca:443",               username: "openrelayproject", credential: "openrelayproject" },
+    { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+  ]
 };
+
+// Fetch fresh ICE servers from our server.
+// Server returns Metered.ca time-limited credentials if METERED_API_KEY is set,
+// otherwise returns static TURN list. Cached for 55 min on the server side.
+async function refreshIceServers() {
+  try {
+    const ctrl = new AbortController();
+    const tid  = setTimeout(() => ctrl.abort(), 4000); // 4s timeout
+    const res  = await fetch("/api/ice-servers", { signal: ctrl.signal });
+    clearTimeout(tid);
+    if (!res.ok) return;
+    const servers = await res.json();
+    if (Array.isArray(servers) && servers.length > 0) {
+      rtcConfig.iceServers = servers;
+      console.log(`[ICE] Loaded ${servers.length} servers from server`);
+    }
+  } catch (e) {
+    console.warn("[ICE] Server fetch failed, using static fallback:", e.message);
+  }
+}
+
+// Fire at startup (background — ready before user clicks Start)
+refreshIceServers();
 
 // ── Particle background ───────────────────────────────────
 (function initParticles() {
@@ -430,11 +450,14 @@ function stopLocalMedia() {
 
 // ── Peer connection ───────────────────────────────────────
 function closePeerConnection() {
-  pendingCandidates = [];
+  pendingCandidates  = [];
+  _isOfferer         = false;
+  _iceRestartPending = false;
   if (peerConnection) {
-    peerConnection.ontrack = null;
-    peerConnection.onicecandidate = null;
+    peerConnection.ontrack                 = null;
+    peerConnection.onicecandidate          = null;
     peerConnection.onconnectionstatechange = null;
+    peerConnection.oniceconnectionstatechange = null;
     peerConnection.close();
     peerConnection = null;
   }
@@ -520,10 +543,15 @@ function buildPeerConnection() {
 }
 
 // Proper ICE restart — creates a new offer with iceRestart:true and sends it to the peer.
-// Must be called only by the original offerer to avoid glare.
+// ONLY the original offerer (_isOfferer===true) does this to prevent offer glare.
+// Glare = both sides simultaneously send offers, creating signalingState conflicts.
 let _iceRestartPending = false;
 async function _doIceRestart() {
   if (!peerConnection || !isMatched || _iceRestartPending) return;
+  if (!_isOfferer) {
+    console.log("[ICE restart] Skipped — this peer is the answerer; waiting for offerer's restart offer");
+    return;
+  }
   _iceRestartPending = true;
   console.warn("[ICE] Restarting ICE via new offer…");
   try {
@@ -533,25 +561,27 @@ async function _doIceRestart() {
   } catch (e) {
     console.error("[ICE restart]", e);
   } finally {
-    setTimeout(() => { _iceRestartPending = false; }, 4000); // cooldown
+    setTimeout(() => { _iceRestartPending = false; }, 4000);
   }
 }
 
 async function createOffer() {
+  // Always fetch fresh TURN credentials before creating a new peer connection
+  await refreshIceServers();
+  _isOfferer = true;
   buildPeerConnection();
   const offer = await peerConnection.createOffer({
     offerToReceiveAudio: true,
     offerToReceiveVideo: true
   });
   await peerConnection.setLocalDescription(offer);
-  socket.emit("webrtc-offer", { sdp: offer });
+  socket.emit("webrtc-offer", { sdp: peerConnection.localDescription });
 }
 
 async function handleOffer(sdp) {
   // ── ICE restart detection ─────────────────────────────────────────
-  // If we already have an active peer connection, this is likely an ICE restart offer.
-  // CRITICAL: Do NOT call buildPeerConnection() here — that would destroy the PC
-  // and all its media senders, breaking video for both users.
+  // If a peer connection already exists, this is an ICE restart offer from the offerer.
+  // CRITICAL: Do NOT call buildPeerConnection() — that destroys the PC and all senders.
   if (peerConnection && peerConnection.signalingState !== "closed") {
     try {
       await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
@@ -564,12 +594,12 @@ async function handleOffer(sdp) {
       socket.emit("webrtc-answer", { sdp: peerConnection.localDescription });
       return;
     } catch (e) {
-      console.warn("[handleOffer] ICE restart update failed, rebuilding PC:", e.message);
-      // Fall through to full rebuild below
+      console.warn("[handleOffer] ICE restart handling failed, doing full rebuild:", e.message);
     }
   }
 
-  // Fresh connection — build a new peer connection
+  // First offer — answerer role; build a fresh peer connection
+  _isOfferer = false;
   buildPeerConnection();
   await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
   for (const c of pendingCandidates) {
@@ -816,38 +846,38 @@ socket.on("matched", ({ strangerGender, strangerName, mode, sharedInterests: si 
   sounds.match();
   showToast(`Matched with ${displayName}! 🎉`, "success");
 
-  if (resolvedMode === "video" && shouldInitiateOffer) {
-    // Reset ICE restart flag for fresh match
-    _iceRestartPending = false;
-    // 30ms delay — just enough for both peers to register the match before offer
-    setTimeout(() => {
-      if (isMatched) createOffer().catch(err => console.error("Offer failed:", err));
-    }, 30);
-  }
-
   if (resolvedMode === "video") {
-    // ── Black-screen watchdog ────────────────────────────────────────────────
-    // After 6s, if remote video hasn't started rendering, force an ICE restart.
-    // This catches silent TURN failures where ICE state never explicitly says "failed".
+    // Set role for both sides before any async timer fires
+    if (shouldInitiateOffer) {
+      _isOfferer         = true;
+      _iceRestartPending = false;
+      // createOffer() fetches fresh ICE servers itself before building PC
+      setTimeout(() => {
+        if (isMatched) createOffer().catch(err => console.error("Offer failed:", err));
+      }, 30);
+    } else {
+      _isOfferer         = false;
+      _iceRestartPending = false;
+      refreshIceServers(); // answerer pre-fetches fresh TURN creds too
+    }
+
+    // ── Black-screen watchdog (offerer only — prevents ICE restart glare) ──
     setTimeout(() => {
-      if (!isMatched || !peerConnection) return;
+      if (!isMatched || !peerConnection || !_isOfferer) return;
       const notPlaying = remoteVideo.readyState < 2 || remoteVideo.videoWidth === 0;
       const iceNotGood = peerConnection.iceConnectionState !== "connected" &&
                          peerConnection.iceConnectionState !== "completed";
       if (notPlaying && iceNotGood) {
-        console.warn("[watchdog] Remote video not playing after 6s — forcing ICE restart");
+        console.warn("[watchdog] Remote video not playing after 6s — ICE restart");
         showToast("Video connection slow, retrying…", "info", 3000);
         _doIceRestart();
       }
     }, 6000);
 
-    // Second watchdog at 14s — if still black after first restart attempt
     setTimeout(() => {
-      if (!isMatched || !peerConnection) return;
-      const stillBlack = remoteVideo.readyState < 2 || remoteVideo.videoWidth === 0;
-      if (stillBlack) {
-        console.warn("[watchdog] Still black after 14s — hard rebuild");
-        showToast("Video reconnecting…", "info", 3000);
+      if (!isMatched || !peerConnection || !_isOfferer) return;
+      if (remoteVideo.readyState < 2 || remoteVideo.videoWidth === 0) {
+        console.warn("[watchdog] Still black at 14s — retry ICE restart");
         _iceRestartPending = false;
         _doIceRestart();
       }

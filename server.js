@@ -46,8 +46,83 @@ app.use(express.static(path.join(__dirname, "public"), {
   }
 }));
 
+// ── ICE / TURN credential service ────────────────────────
+// Provides fresh TURN credentials to clients.
+// Set env var METERED_API_KEY (from metered.ca free account) for reliable global TURN.
+// Without it, falls back to free public servers (less reliable on mobile).
+
+const STATIC_ICE = [
+  // STUN — always available, no auth, used for direct P2P
+  { urls: "stun:stun.l.google.com:19302"  },
+  { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun.cloudflare.com:3478" },
+  // TURN — FreeTURN (dedicated free TURN server)
+  { urls: "turn:freeturn.net:3479", username: "free", credential: "free" },
+  { urls: "turn:freeturn.net:5349", username: "free", credential: "free" },
+  // TURN — OpenRelay via metered.ca (backup, multiple ports/protocols)
+  { urls: "turn:openrelay.metered.ca:80",               username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:openrelay.metered.ca:80?transport=tcp",  username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:openrelay.metered.ca:443",               username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+];
+
+let _iceCache = null;
+let _iceCacheTime = 0;
+const ICE_CACHE_TTL = 55 * 60 * 1000; // 55 min (Metered creds valid ~1hr)
+
+async function getIceServers() {
+  if (_iceCache && Date.now() - _iceCacheTime < ICE_CACHE_TTL) return _iceCache;
+
+  const apiKey  = process.env.METERED_API_KEY;
+  const appName = process.env.METERED_APP_NAME || "omingle";
+
+  if (apiKey) {
+    const https = require("https");
+    try {
+      const data = await new Promise((resolve, reject) => {
+        https.get(
+          `https://${appName}.metered.live/api/v1/turn/credentials?apiKey=${apiKey}`,
+          res => {
+            let body = "";
+            res.on("data", d => (body += d));
+            res.on("end", () => {
+              try { resolve(JSON.parse(body)); } catch (e) { reject(e); }
+            });
+          }
+        ).on("error", reject);
+      });
+      if (Array.isArray(data) && data.length > 0) {
+        _iceCache    = data;
+        _iceCacheTime = Date.now();
+        console.log(`[TURN] Fetched ${data.length} servers from Metered.ca`);
+        return _iceCache;
+      }
+    } catch (e) {
+      console.warn("[TURN] Metered.ca fetch failed:", e.message);
+    }
+  }
+
+  // Static fallback
+  _iceCache    = STATIC_ICE;
+  _iceCacheTime = Date.now();
+  return _iceCache;
+}
+
+// Called eagerly at startup so cache is warm before first user arrives
+getIceServers().catch(() => {});
+
 // ── Health-check endpoint (Render uses this) ──────────────
 app.get("/healthz", (_req, res) => res.json({ ok: true, users: users.size }));
+
+// ── ICE servers endpoint — clients call this before WebRTC ─
+app.get("/api/ice-servers", async (_req, res) => {
+  try {
+    const servers = await getIceServers();
+    res.json(servers);
+  } catch (_) {
+    res.json(STATIC_ICE); // always return something
+  }
+});
 
 // ── Socket.IO ─────────────────────────────────────────────
 const io = new Server(server, {
