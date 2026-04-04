@@ -121,7 +121,11 @@ function _startSocketRelay() {
       captureCtx.drawImage(localVideo, 0, 0, 320, 240);
       _relayCanvas.toBlob(blob => {
         if (!blob || !socket.connected || !isMatched) return;
-        blob.arrayBuffer().then(buf => socket.emit("relay-video-frame", buf));
+        blob.arrayBuffer().then(buf => {
+          _relayFrameSendCount++;
+          if (_relayFrameSendCount === 1) console.log("[relay] First video frame sent to partner");
+          socket.emit("relay-video-frame", buf);
+        });
       }, "image/jpeg", 0.45);
     } catch (_) {}
   }, 67); // ~15 fps
@@ -130,25 +134,32 @@ function _startSocketRelay() {
   try {
     const stream = localStream || localVideo.srcObject;
     if (stream && stream.getAudioTracks().length > 0) {
-      _relayAudioCtx = new AudioContext({ sampleRate: 16000 }); // 16kHz is enough for voice
+      _relayAudioCtx = new AudioContext({ sampleRate: 16000 });
+      // Ensure AudioContext is running (user gesture should already have unlocked it)
+      _relayAudioCtx.resume().catch(() => {});
       const src       = _relayAudioCtx.createMediaStreamSource(stream);
       const processor = _relayAudioCtx.createScriptProcessor(1024, 1, 1);
       src.connect(processor);
       processor.connect(_relayAudioCtx.destination);
+      let _audioSendCount = 0;
       processor.onaudioprocess = (e) => {
         if (!isMatched || !socket.connected) return;
         const floats = e.inputBuffer.getChannelData(0);
-        // Convert float32 PCM → int16 for compact transmission (~2KB per chunk @ 16kHz)
         const int16  = new Int16Array(floats.length);
         for (let i = 0; i < floats.length; i++) {
           int16[i] = Math.max(-32768, Math.min(32767, floats[i] * 32767));
         }
+        _audioSendCount++;
+        if (_audioSendCount === 1) console.log("[relay] First audio chunk sent to partner");
         socket.emit("relay-audio-chunk", int16.buffer);
       };
       _relayAudioCapture = processor;
+      console.log("[relay] Audio capture started at 16kHz");
+    } else {
+      console.warn("[relay] No audio tracks in local stream");
     }
   } catch (e) {
-    console.warn("[relay audio]", e.message);
+    console.warn("[relay audio capture]", e.message);
   }
 }
 
@@ -166,12 +177,26 @@ function _stopSocketRelay() {
 }
 
 // Receive remote video frames and draw on canvas overlay
-let _relayAudioPlayCtx = null;
-let _relayNextPlayTime  = 0;
+let _relayAudioPlayCtx  = null;
+let _relayNextPlayTime   = 0;
+let _relayFrameRecvCount = 0;
+let _relayFrameSendCount = 0;
+
 socket.on("relay-video-frame", (frame) => {
+  // Auto-start relay on receive side too — don’t wait for the 22s watchdog
+  // This fires as soon as the remote peer starts sending relay frames
+  if (!_relayActive) {
+    console.warn("[relay] Received remote relay frame — auto-starting local relay");
+    _startSocketRelay();
+  }
   if (!_relayRemoteCtx) return;
-  const blob = new Blob([frame], { type: "image/jpeg" });
+  _relayFrameRecvCount++;
+  if (_relayFrameRecvCount === 1) console.log("[relay] First video frame received from remote");
+  // Ensure frame is always an ArrayBuffer (Socket.io may give Buffer on some platforms)
+  const buf  = frame instanceof ArrayBuffer ? frame : frame.buffer || frame;
+  const blob = new Blob([buf], { type: "image/jpeg" });
   createImageBitmap(blob).then(bmp => {
+    if (!_relayRemoteCtx) return;
     _relayRemoteCtx.drawImage(bmp, 0, 0, 320, 240);
     bmp.close();
   }).catch(() => {});
@@ -180,11 +205,21 @@ socket.on("relay-video-frame", (frame) => {
 // Receive remote audio chunks and schedule playback with minimal jitter
 socket.on("relay-audio-chunk", (chunk) => {
   try {
+    // Ensure we have a running AudioContext (may need user gesture on mobile)
     if (!_relayAudioPlayCtx) {
       _relayAudioPlayCtx = new AudioContext({ sampleRate: 16000 });
-      _relayNextPlayTime  = _relayAudioPlayCtx.currentTime;
+      _relayNextPlayTime  = _relayAudioPlayCtx.currentTime + 0.1;
+      console.log("[relay] Audio playback context created");
     }
-    const int16  = new Int16Array(chunk);
+    // Resume if suspended (mobile browser may suspend until interaction)
+    if (_relayAudioPlayCtx.state === "suspended") {
+      _relayAudioPlayCtx.resume().catch(() => {});
+    }
+    // Coerce to ArrayBuffer regardless of Node.js Buffer vs ArrayBuffer
+    const rawBuf = chunk instanceof ArrayBuffer ? chunk
+                 : chunk.buffer ? chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength)
+                 : chunk;
+    const int16  = new Int16Array(rawBuf);
     const floats = new Float32Array(int16.length);
     for (let i = 0; i < int16.length; i++) floats[i] = int16[i] / 32767;
     const buf    = _relayAudioPlayCtx.createBuffer(1, floats.length, 16000);
@@ -192,13 +227,15 @@ socket.on("relay-audio-chunk", (chunk) => {
     const src    = _relayAudioPlayCtx.createBufferSource();
     src.buffer   = buf;
     src.connect(_relayAudioPlayCtx.destination);
-    // Schedule slightly in the future to smooth jitter
-    const playAt = Math.max(_relayAudioPlayCtx.currentTime + 0.04, _relayNextPlayTime);
+    // Schedule 80ms ahead to absorb network jitter
+    const now    = _relayAudioPlayCtx.currentTime;
+    const playAt = Math.max(now + 0.08, _relayNextPlayTime);
     src.start(playAt);
     _relayNextPlayTime = playAt + buf.duration;
-  } catch (_) {}
+  } catch (e) {
+    console.warn("[relay audio playback]", e.message);
+  }
 });
-
 
 // ── WebRTC config ─────────────────────────────────────────
 // iceServers is populated dynamically from /api/ice-servers before each call.
@@ -633,7 +670,20 @@ function buildPeerConnection() {
   };
 
   peerConnection.onicecandidate = event => {
-    if (event.candidate) socket.emit("webrtc-ice-candidate", { candidate: event.candidate });
+    if (event.candidate) {
+      const c = event.candidate;
+      // Log candidate type so we can confirm TURN relay candidates are gathered
+      console.log(`[ICE candidate] type=${c.type} proto=${c.protocol} addr=${c.address}:${c.port}`);
+      if (c.type === "relay") {
+        console.log("%c[ICE] ✓ RELAY candidate gathered — TURN is working!", "color:green;font-weight:bold", c.relatedAddress);
+      }
+      socket.emit("webrtc-ice-candidate", { candidate: c });
+    } else {
+      // Null candidate = gathering complete
+      console.log("[ICE] Gathering complete. Local candidates:",
+        peerConnection.localDescription?.sdp
+          ?.split("\n").filter(l => l.startsWith("a=candidate")).length ?? 0);
+    }
   };
 
   // ── ICE connection state — fires reliably on mobile (unlike connectionstatechange) ──
@@ -800,12 +850,14 @@ async function startChatFlow() {
   currentInterests = interests;
   syncModeUi(mode);
 
-  // ── USER GESTURE BLESSING ─────────────────────────────────
   // iOS/Android require a user gesture to play video elements.
-  // Calling .play() here "blesses" them so they can autoplay
-  // the incoming WebRTC streams later without another click.
   localVideo.play().catch(() => {});
   remoteVideo.play().catch(() => {});
+
+  // Pre-unlock relay audio context if it exists
+  if (_relayAudioPlayCtx && _relayAudioPlayCtx.state === "suspended") {
+    _relayAudioPlayCtx.resume().catch(() => {});
+  }
 
   try {
     if (mode === "video") {
@@ -1024,12 +1076,15 @@ socket.on("matched", ({ strangerGender, strangerName, mode, sharedInterests: si 
 });
 
 socket.on("webrtc-offer", async ({ sdp }) => {
+  console.log("[Signaling] Received Offer");
   try { await handleOffer(sdp); } catch (e) { console.error("Offer handling:", e); }
 });
 socket.on("webrtc-answer", async ({ sdp }) => {
+  console.log("[Signaling] Received Answer");
   try { await handleAnswer(sdp); } catch (e) { console.error("Answer handling:", e); }
 });
 socket.on("webrtc-ice-candidate", async ({ candidate }) => {
+  // console.log("[Signaling] Received Candidate");
   try { await handleIceCandidate(candidate); } catch (e) { console.error("ICE:", e); }
 });
 
