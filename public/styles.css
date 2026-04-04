@@ -1141,29 +1141,20 @@ kbd {
   :root { --shell-padding: 0px; }
   * { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
 
-  /* App-like 100vh lock */
-  html, body { 
-    height: 100%; 
-    overflow: hidden; 
-    overscroll-behavior: none; 
-    margin: 0; 
+  /* Body: NO overflow:hidden — kills Android touch coordinates after scroll */
+  html, body {
+    height: 100%;
+    margin: 0;
+    overscroll-behavior: none; /* only thing safe on body */
   }
 
-  body {
-    display: flex;
-    flex-direction: column;
-  }
-
-  /* Shell full-bleed */
+  /* Shell full-bleed — NO overflow:hidden, body scrolls naturally for join screen */
   .page-shell {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
     width: 100%;
     max-width: 100%;
     padding: 0;
     padding-top: env(safe-area-inset-top, 0px);
-    overflow: hidden;
+    min-height: 100%;
   }
 
   /* ── HEADER (ALWAYS Top) ── */
@@ -1182,24 +1173,18 @@ kbd {
   .online-badge  { font-size: 0.75rem; padding: 5px 12px; }
   .sound-toggle  { width: 34px; height: 34px; }
 
-  /* ── PAGE MAIN ── */
+  /* ── PAGE MAIN — just a container, no overflow clip ── */
   .page-main {
-    flex: 1;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
-    position: relative;
-    z-index: 10;
   }
 
-  /* ── JOIN SCREEN — scrolls internally ── */
+  /* ── JOIN SCREEN — body scrolls naturally, NO overflow on self ── */
   .screen-join {
-    flex: 1;
-    display: flex !important; /* ensures flex layout works */
+    display: flex !important;
     flex-direction: column;
     padding: 0 12px 24px;
-    overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
+    /* No overflow-y here — let the body handle it. Fixes Android touch bug. */
   }
   .screen-join.hidden {
     display: none !important;
@@ -1220,16 +1205,18 @@ kbd {
   .form-input, .form-select { min-height: 44px; font-size: 16px; }
 
   /* ══════════════════════════════════════════════════════════
-     CHAT SCREEN — App layout
+     CHAT SCREEN — position:fixed viewport lock
+     ONLY the chat screen uses fixed — join screen is normal flow.
      ══════════════════════════════════════════════════════════ */
   .screen-chat {
-    flex: 1;
-    display: flex !important; /* keeps flex on */
+    position: fixed !important; /* locks to viewport — reliable on modern Android/iOS */
+    top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 100;
+    overflow: hidden;
+    display: flex !important;
     flex-direction: column;
     padding: 0;
-    overflow: hidden;
-    position: relative;
-    z-index: 20;
+    background: var(--bg);
   }
   .screen-chat.hidden {
     display: none !important;
