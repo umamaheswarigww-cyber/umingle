@@ -138,6 +138,11 @@ const io = new Server(server, {
   pingInterval:       15000,
   // 1 MB — large packet buffer for high-latency mobile/VPN socket.io relay traffic
   maxHttpBufferSize:  1e6,
+  connectionStateRecovery: {
+    // Keep the room and socket state alive long enough for mobile network handoffs.
+    maxDisconnectionDuration: 2 * 60 * 1000,
+    skipMiddlewares: true
+  },
   cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
@@ -154,6 +159,8 @@ const users      = new Map(); // socketId → { name, gender, mode, interests, r
 const rooms      = new Map(); // roomId   → { a: socketId, b: socketId }
 const rateLimits = new Map(); // socketId → lastMessageTimestamp
 const ipConns    = new Map(); // ip       → connectionCount
+const disconnectTimers = new Map(); // socketId → cleanup timeout
+const DISCONNECT_GRACE_MS = (2 * 60 * 1000) + 5000;
 
 const IP_MAX = 10; // max simultaneous connections per IP (generous for NAT/proxies)
 
@@ -213,6 +220,44 @@ function makeRoomId(a, b) {
 
 function broadcastCount() {
   io.emit("user-count", { count: users.size });
+}
+
+function clearDisconnectTimer(socketId) {
+  const timer = disconnectTimers.get(socketId);
+  if (timer) clearTimeout(timer);
+  disconnectTimers.delete(socketId);
+}
+
+function scheduleDisconnectCleanup(socketId, reason = "Stranger disconnected") {
+  const user = users.get(socketId);
+  if (!user) return;
+
+  removeFromAllPools(socketId);
+
+  // No active match to preserve, so clean up right away.
+  if (!user.roomId || !user.partnerId) {
+    clearDisconnectTimer(socketId);
+    disconnect(socketId, reason);
+    users.delete(socketId);
+    broadcastCount();
+    return;
+  }
+
+  clearDisconnectTimer(socketId);
+
+  // Let the other side know the match is temporarily unavailable, but keep the
+  // session alive for the recovery window.
+  io.to(user.partnerId).emit("partner-disconnected", { reason });
+
+  const timer = setTimeout(() => {
+    disconnectTimers.delete(socketId);
+    if (!users.has(socketId)) return;
+    disconnect(socketId, reason);
+    users.delete(socketId);
+    broadcastCount();
+  }, DISCONNECT_GRACE_MS);
+
+  disconnectTimers.set(socketId, timer);
 }
 
 // ── Matching ──────────────────────────────────────────────
@@ -324,6 +369,7 @@ function tryMatch(socket) {
 }
 
 function disconnect(socketId, reason = "Stranger disconnected") {
+  clearDisconnectTimer(socketId);
   const user = users.get(socketId);
   if (!user) return;
   const { roomId, partnerId } = user;
@@ -355,6 +401,16 @@ io.on("connection", (socket) => {
     return;
   }
   ipConns.set(ip, count);
+
+  // Socket.IO recovery preserves the socket id and rooms after short network drops.
+  if (socket.recovered && disconnectTimers.has(socket.id)) {
+    clearDisconnectTimer(socket.id);
+    const user = users.get(socket.id);
+    if (user?.roomId) socket.join(user.roomId);
+    if (user?.partnerId) {
+      io.to(user.partnerId).emit("partner-reconnected", { reason: "Stranger reconnected" });
+    }
+  }
 
   broadcastCount();
 
@@ -455,6 +511,12 @@ io.on("connection", (socket) => {
     io.to(user.partnerId).emit("webrtc-answer", { sdp });
   });
 
+  socket.on("webrtc-restart-request", ({ forceRelay = false } = {}) => {
+    const user = users.get(socket.id);
+    if (!user || user.mode !== "video" || !user.partnerId) return;
+    io.to(user.partnerId).emit("webrtc-restart-request", { forceRelay: !!forceRelay });
+  });
+
   socket.on("webrtc-ice-candidate", ({ candidate } = {}) => {
     const user = users.get(socket.id);
     if (!user || user.mode !== "video" || !user.partnerId || !candidate) return;
@@ -496,11 +558,8 @@ io.on("connection", (socket) => {
     const cnt = ipConns.get(ip) || 1;
     cnt <= 1 ? ipConns.delete(ip) : ipConns.set(ip, cnt - 1);
 
-    disconnect(socket.id, "Stranger disconnected");
-    removeFromAllPools(socket.id);
-    users.delete(socket.id);
+    scheduleDisconnectCleanup(socket.id, "Stranger disconnected");
     rateLimits.delete(socket.id);
-    broadcastCount();
   });
 });
 

@@ -829,6 +829,7 @@ kbd {
   gap: 16px;
   background: linear-gradient(135deg, rgba(59,130,246,0.06), rgba(168,85,247,0.06));
   z-index: 1;
+  cursor: pointer;
 }
 
 .video-placeholder p { color: var(--muted); font-size: 0.9rem; }

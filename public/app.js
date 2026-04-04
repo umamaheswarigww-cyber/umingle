@@ -60,6 +60,65 @@ function updateConnStatus(type, text) {
   );
 }
 
+async function ensureRemotePlayback(reason = "track") {
+  if (!remoteVideo.srcObject) return false;
+
+  remoteVideo.setAttribute("playsinline", "");
+  remoteVideo.setAttribute("webkit-playsinline", "");
+
+  try {
+    await remoteVideo.play();
+    _remoteIsPlaying = true;
+    remotePlaceholder.classList.add("hidden");
+    return true;
+  } catch (err) {
+    _remoteIsPlaying = false;
+    remotePlaceholder.classList.remove("hidden");
+    console.warn(`[WebRTC] Remote playback blocked (${reason}):`, err?.message || err);
+    if (err?.name === "NotAllowedError") {
+      showToast("Tap the video to resume playback.", "info", 2800);
+    }
+    return false;
+  }
+}
+
+function bindRemotePlaybackEvents() {
+  if (_remotePlaybackBound) return;
+  _remotePlaybackBound = true;
+
+  remoteVideo.addEventListener("playing", () => {
+    _remoteIsPlaying = true;
+    remotePlaceholder.classList.add("hidden");
+    if (_relayActive) {
+      updateConnStatus("relay", "Relay Mode");
+    } else if (peerConnection?.iceConnectionState === "connected" || peerConnection?.iceConnectionState === "completed") {
+      updateConnStatus("online", "WebRTC");
+    }
+  });
+
+  const markBuffering = () => {
+    _remoteIsPlaying = false;
+    if (isMatched) remotePlaceholder.classList.remove("hidden");
+    if (!peerConnection) return;
+    const state = peerConnection.iceConnectionState;
+    if (state === "connected" || state === "completed") {
+      updateConnStatus("offline", "Buffering");
+    }
+  };
+
+  remoteVideo.addEventListener("canplay", () => {
+    if (remoteVideo.srcObject) ensureRemotePlayback("canplay").catch(() => {});
+  });
+  remoteVideo.addEventListener("waiting", markBuffering);
+  remoteVideo.addEventListener("stalled", markBuffering);
+  remoteVideo.addEventListener("pause", markBuffering);
+  remoteVideo.addEventListener("emptied", markBuffering);
+
+  remotePlaceholder.addEventListener("click", () => {
+    if (remoteVideo.srcObject) ensureRemotePlayback("manual-tap").catch(() => {});
+  });
+}
+
 
 const messages     = document.getElementById("messages");
 const messageInput = document.getElementById("messageInput");
@@ -88,6 +147,10 @@ let currentInterests = [];
 let typingTimeout    = null;
 let audioCtx         = null;
 let _isOfferer       = false; // tracks which peer sent the original WebRTC offer
+let _restartRequestPending = false;
+let _restartRequestTimer   = null;
+let _remotePlaybackBound    = false;
+let _remoteIsPlaying        = false;
 
 // ── Socket.io media relay fallback ────────────────────────
 // Used when WebRTC ICE fails on mobile internet, VPN, or restrictive networks.
@@ -539,6 +602,8 @@ function syncModeUi(mode) {
   cameraBtn.disabled = !isVideo;
 
   if (!isVideo) {
+    _remoteIsPlaying = false;
+    try { remoteVideo.pause(); } catch (_) {}
     remoteVideo.srcObject = null;
   } else if (localStream) {
     localVideo.srcObject = localStream;
@@ -647,6 +712,10 @@ function closePeerConnection() {
   pendingCandidates  = [];
   _isOfferer         = false;
   _iceRestartPending = false;
+  _restartRequestPending = false;
+  clearTimeout(_restartRequestTimer);
+  _restartRequestTimer = null;
+  _remoteIsPlaying    = false;
   _stopSocketRelay();  // always clean up relay when chat ends
   if (peerConnection) {
     peerConnection.ontrack                 = null;
@@ -656,6 +725,7 @@ function closePeerConnection() {
     peerConnection.close();
     peerConnection = null;
   }
+  try { remoteVideo.pause(); } catch (_) {}
   remoteVideo.srcObject = null;
   remotePlaceholder.classList.remove("hidden");
 }
@@ -704,8 +774,7 @@ function buildPeerConnection() {
 
     remoteVideo.setAttribute("playsinline", "");
     remoteVideo.setAttribute("webkit-playsinline", "");
-    if (remoteVideo.paused) remoteVideo.play().catch(() => {});
-    remotePlaceholder.classList.add("hidden");
+    ensureRemotePlayback("ontrack").catch(() => {});
   };
 
   peerConnection.onicecandidate = event => {
@@ -734,6 +803,9 @@ function buildPeerConnection() {
       statusBadge.textContent = "Connected";
       statusBadge.classList.remove("searching");
       updateConnStatus("online", "WebRTC");
+      clearTimeout(_restartRequestTimer);
+      _restartRequestTimer = null;
+      _restartRequestPending = false;
     }
     if (s === "disconnected") {
       statusBadge.textContent = "Reconnecting…";
@@ -761,8 +833,24 @@ function buildPeerConnection() {
 // Proper ICE restart — creates a new offer with iceRestart:true and sends it to the peer.
 let _iceRestartPending = false;
 async function _doIceRestart(forceRelay = false) {
-  if (!peerConnection || !isMatched || _iceRestartPending) return;
-  if (!_isOfferer) return;
+  if (!peerConnection || !isMatched) return;
+
+  // The designated offerer performs the actual renegotiation. The answerer
+  // asks the offerer to restart, which avoids glare during network handoffs.
+  if (!_isOfferer) {
+    if (_restartRequestPending) return;
+    _restartRequestPending = true;
+    statusBadge.textContent = "Reconnecting…";
+    updateConnStatus(forceRelay ? "relay" : "offline", forceRelay ? "Relay request" : "Restart request");
+    socket.emit("webrtc-restart-request", { forceRelay });
+    clearTimeout(_restartRequestTimer);
+    _restartRequestTimer = setTimeout(() => {
+      _restartRequestPending = false;
+    }, 5000);
+    return;
+  }
+
+  if (_iceRestartPending) return;
 
   if (forceRelay) {
     console.warn("[ICE] HARD RESTART: Forcing relay-only transport policy");
@@ -770,6 +858,9 @@ async function _doIceRestart(forceRelay = false) {
   }
 
   _iceRestartPending = true;
+  clearTimeout(_restartRequestTimer);
+  _restartRequestTimer = null;
+  _restartRequestPending = false;
   try {
     const offer = await peerConnection.createOffer({ iceRestart: true });
     await peerConnection.setLocalDescription(offer);
@@ -797,6 +888,10 @@ async function createOffer() {
 }
 
 async function handleOffer(sdp) {
+  clearTimeout(_restartRequestTimer);
+  _restartRequestTimer = null;
+  _restartRequestPending = false;
+
   if (peerConnection && peerConnection.signalingState !== "closed") {
     try {
       await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
@@ -826,6 +921,9 @@ async function handleOffer(sdp) {
 
 async function handleAnswer(sdp) {
   if (!peerConnection) return;
+  clearTimeout(_restartRequestTimer);
+  _restartRequestTimer = null;
+  _restartRequestPending = false;
   await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
   for (const c of pendingCandidates) await peerConnection.addIceCandidate(new RTCIceCandidate(c));
   pendingCandidates = [];
@@ -1098,8 +1196,8 @@ socket.on("matched", ({ strangerGender, strangerName, mode, sharedInterests: si 
 
     // First watchdog at 8s — retry ICE restart
     setTimeout(() => {
-      if (!isMatched || !peerConnection || !_isOfferer) return;
-      if (remoteVideo.readyState < 2 || remoteVideo.videoWidth === 0) {
+      if (!isMatched || !peerConnection) return;
+      if (!_remoteIsPlaying) {
         console.warn("[watchdog] Remote video not playing after 8s — ICE restart");
         _doIceRestart();
       }
@@ -1107,8 +1205,8 @@ socket.on("matched", ({ strangerGender, strangerName, mode, sharedInterests: si 
 
     // Second watchdog at 18s — HARD RESTART with 'relay' policy + Media Reset
     setTimeout(() => {
-      if (!isMatched || !peerConnection || !_isOfferer) return;
-      if (remoteVideo.readyState < 2 || remoteVideo.videoWidth === 0) {
+      if (!isMatched || !peerConnection) return;
+      if (!_remoteIsPlaying) {
         console.warn("[watchdog] Still black at 18s — FORCING RELAY + HARD MEDIA RESET");
         
         // Jiggle the camera hardware (sometimes mobile browsers get 'stuck' on older streams)
@@ -1131,8 +1229,7 @@ socket.on("matched", ({ strangerGender, strangerName, mode, sharedInterests: si 
     // Switch to Socket.io relay which works on ANY network.
     setTimeout(() => {
       if (!isMatched) return;
-      const stillBlack = !_relayActive &&
-                         (remoteVideo.readyState < 2 || remoteVideo.videoWidth === 0);
+      const stillBlack = !_relayActive && !_remoteIsPlaying;
       if (stillBlack) {
         console.warn("[watchdog] WebRTC totally failed at 22s — starting Socket.io relay");
         _startSocketRelay();
@@ -1148,6 +1245,11 @@ socket.on("webrtc-offer", async ({ sdp }) => {
 socket.on("webrtc-answer", async ({ sdp }) => {
   console.log("[Signaling] Received Answer");
   try { await handleAnswer(sdp); } catch (e) { console.error("Answer handling:", e); }
+});
+socket.on("webrtc-restart-request", async ({ forceRelay = false } = {}) => {
+  if (!peerConnection || !isMatched || !_isOfferer) return;
+  console.log("[Signaling] Restart request received");
+  try { await _doIceRestart(forceRelay); } catch (e) { console.error("ICE restart request:", e); }
 });
 socket.on("webrtc-ice-candidate", async ({ candidate }) => {
   // console.log("[Signaling] Received Candidate");
@@ -1182,6 +1284,29 @@ socket.on("partner-left", ({ reason }) => {
   showToast("Stranger disconnected", "info");
 });
 
+socket.on("partner-disconnected", ({ reason }) => {
+  if (!isMatched) return;
+  _remoteIsPlaying = false;
+  try { remoteVideo.pause(); } catch (_) {}
+  statusBadge.textContent = "Reconnecting…";
+  statusBadge.classList.add("searching");
+  updateConnStatus("offline", "Reconnecting");
+  remotePlaceholder.classList.remove("hidden");
+  setChatEnabled(false);
+  addSystemMessage(`↻ ${reason || "Stranger temporarily disconnected."}`);
+  showToast("Stranger is reconnecting…", "info", 4000);
+});
+
+socket.on("partner-reconnected", ({ reason }) => {
+  if (!isMatched) return;
+  statusBadge.textContent = currentMode === "video" ? "Video Live" : "Text Live";
+  statusBadge.classList.remove("searching");
+  updateConnStatus(_relayActive ? "relay" : "online", _relayActive ? "Relay Mode" : "WebRTC");
+  setChatEnabled(true);
+  addSystemMessage(`✓ ${reason || "Stranger reconnected."}`);
+  showToast("Stranger reconnected", "success", 2500);
+});
+
 socket.on("chat-ended", ({ message }) => {
   addSystemMessage(message || "Chat ended.");
 });
@@ -1210,7 +1335,7 @@ function _hideReconnectOverlay() {
   _intentionalLeave = false;
 }
 
-socket.on("reconnect",         () => { _hideReconnectOverlay(); showToast("Reconnected! ✅", "success"); });
+socket.on("reconnect",         () => { showToast("Reconnected! ✅", "success"); });
 socket.on("reconnect_attempt", (n) => {
   // After 5 failed attempts try switching to polling as fallback
   if (n === 5) socket.io.opts.transports = ["polling", "websocket"];
@@ -1222,9 +1347,24 @@ socket.on("reconnect_failed",  () => {
 });
 
 // Also hide overlay as soon as socket re-connects at transport level
-socket.on("connect", () => {
-  _hideReconnectOverlay();
+socket.on("connect", async () => {
   startBtn.disabled = false; // re-enable in case it was stuck
+  if (socket.recovered) {
+    _hideReconnectOverlay();
+    if (isMatched) setChatEnabled(true);
+    if (isMatched && peerConnection) {
+      await refreshIceServers();
+      _doIceRestart(true).catch(() => {});
+    }
+    return;
+  }
+
+  if (!chatScreen.classList.contains("hidden") && isMatched) {
+    reconnectOverlay.classList.remove("hidden");
+    return;
+  }
+
+  _hideReconnectOverlay();
 });
 
 // ── Page visibility — reconnect when phone wakes from sleep/background ──────
@@ -1236,20 +1376,20 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
-// ── Safety net: auto-dismiss stuck reconnect overlay after 90s ───────────────
+// ── Safety net: auto-dismiss stuck reconnect overlay after 120s ──────────────
 let _reconnectKillTimer = null;
 
 socket.on("disconnect", () => {
   // Kill timer if already running
   clearTimeout(_reconnectKillTimer);
-  // After 90 s of failed reconnect, give up and return to lobby
+  // After 120 s of failed reconnect, give up and return to lobby
   _reconnectKillTimer = setTimeout(() => {
     if (!socket.connected) {
       _hideReconnectOverlay();
       showToast("Connection lost. Please check your network.", "danger", 8000);
       returnToLobby();
     }
-  }, 90_000);
+  }, 120_000);
 });
 
 socket.on("connect", () => {
@@ -1262,6 +1402,7 @@ renderInterestPreview();
 syncModeUi(getSelectedMode());
 setChatEnabled(false);
 resetRemoteUi("Ready");
+bindRemotePlaybackEvents();
 statusBadge.classList.remove("searching");
 
 // Pre-warm camera in the background on page load (video is the default mode)
