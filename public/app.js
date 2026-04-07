@@ -503,34 +503,19 @@ socket.on("relay-audio-chunk", (chunk) => {
 });
 
 // ── WebRTC config ─────────────────────────────────────────
-// iceServers is populated dynamically from /api/ice-servers before each call.
-// Static fallback is included here so WebRTC can start even if the fetch fails.
+// ── WebRTC config ─────────────────────────────────────────
+/**
+ * Local fallback servers. These are only used if the server-side 
+ * /api/ice-servers fetch fails.
+ */
 const DEFAULT_ICE_SERVERS = [
-  // STUN — High availability Google/Cloudflare
-  { urls: "stun:stun.l.google.com:19302"  },
+  { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
-  { urls: "stun:stun2.l.google.com:19302" },
-  { urls: "stun:stun3.l.google.com:19302" },
-  { urls: "stun:stun4.l.google.com:19302" },
-  { urls: "stun:stun.cloudflare.com:3478" },
-  
-  // TURN — FreeTURN (dedicated free TURN server)
-  { urls: "turn:freeturn.net:3479", username: "free", credential: "free" },
-  { urls: "turn:freeturn.net:5349", username: "free", credential: "free" },
-
-  // TURN — OpenRelay / Global Relay via metered.ca (Backup list)
-  // TLS (Turns 443 & 5349) — Best for mobile/VPN
-  { urls: "turns:openrelay.metered.ca:443",              username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turns:openrelay.metered.ca:5349",             username: "openrelayproject", credential: "openrelayproject" },
-  
-  // TCP 443 & 80 — Non-TLS fallbacks for restrictive networks that block UDP/5349
-  { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turn:openrelay.metered.ca:80?transport=tcp",  username: "openrelayproject", credential: "openrelayproject" },
-  
-  // UDP — Traditional WebRTC relay
-  { urls: "turn:openrelay.metered.ca:80",                username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turn:openrelay.metered.ca:443",               username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "stun:stun.cloudflare.com:3478" }
 ];
+
+
+
 
 
 
@@ -1001,8 +986,16 @@ function buildPeerConnection() {
   // NOTE: Do NOT pre-assign an empty MediaStream to remoteVideo.srcObject here.
   // Setting srcObject to an empty stream can freeze mobile browser video rendering.
   // We set it only when real tracks arrive in ontrack.
+  const urlParams = new URLSearchParams(window.location.search);
+  const forceRelayMode = urlParams.has("testRelay") || urlParams.has("forceRelay");
 
-  peerConnection = new RTCPeerConnection(buildRtcConfiguration());
+  const config = buildRtcConfiguration();
+  if (forceRelayMode) {
+    config.iceTransportPolicy = "relay";
+    console.warn("[WebRTC] Debug: FORCING RELAY TRANSPORT POLICY");
+  }
+
+  peerConnection = new RTCPeerConnection(config);
 
   localStream.getTracks().forEach(track => {
     const sender = peerConnection.addTrack(track, localStream);
@@ -1046,29 +1039,28 @@ function buildPeerConnection() {
   peerConnection.onicecandidate = event => {
     if (event.candidate) {
       const c = event.candidate;
-      // Log candidate type so we can confirm TURN relay candidates are gathered
-      console.log(`[ICE candidate] type=${c.type} proto=${c.protocol} addr=${c.address}:${c.port}`);
-      if (c.type === "relay") {
+      if (c.candidate.indexOf("typ relay") !== -1) {
         _relayCandidateFound = true;
-        console.log("%c[ICE] ✓ RELAY candidate gathered — TURN is working!", "color:green;font-weight:bold", c.relatedAddress);
+        console.log("%c[ICE] RELAY candidate found!", "color:green;font-weight:bold");
+      } else if (c.candidate.indexOf("typ srflx") !== -1) {
+        console.log("[ICE] STUN (srflx) candidate found");
+      } else if (c.candidate.indexOf("typ host") !== -1) {
+        console.log("[ICE] Local (host) candidate found");
       }
       socket.emit("webrtc-ice-candidate", { candidate: c });
     } else {
       // ── Diagnostics: Host-Only Candidate Check ─────────────
-      // If gathering is complete and we found ONLY host candidates,
-      // it's a 100% indicator that STUN/TURN is blocked or unreachable.
       const sdp = peerConnection.localDescription?.sdp || "";
       const hasSrflx = sdp.includes("typ srflx");
       const hasRelay = sdp.includes("typ relay");
 
-      console.log(`[ICE] Gathering complete. Local candidates:`, sdp.split("\n").filter(l => l.startsWith("a=candidate")).length);
+      console.log(`[ICE] Gathering complete. Statistics: relay=${hasRelay}, srflx=${hasSrflx}`);
 
-      if (!hasSrflx && !hasRelay && isMatched && currentMode === "video") {
-        console.warn("%c[ICE] CRITICAL: Only host candidates found. TURN is unreachable/blocked!", "color:red;font-weight:bold");
-        showToast("Restricted network detected. Trying relay fallback...", "warn", 6000);
-        // Force an early relay-only restart
-        if (_isOfferer) {
-          _doIceRestart(true).catch(() => {});
+      if (!hasRelay && isMatched && currentMode === "video") {
+        if (!hasSrflx) {
+          console.error("%c[ICE] CRITICAL: Only host candidates found. TURN/STUN are unreachable!", "color:red;font-weight:bold");
+        } else {
+          console.warn("%c[ICE] WARNING: No relay candidates found. Connections to restrictive NATs will FAIL.", "color:orange;font-weight:bold");
         }
       }
     }
@@ -1127,7 +1119,12 @@ async function _doIceRestart(forceRelay = false) {
     if (forceRelay) {
       console.warn("[ICE] HARD RESTART: Forcing relay-only transport policy");
     }
+    // Reset gathering flags
+    _relayCandidateFound = false;
+
     const nextConfig = buildRtcConfiguration();
+    if (forceRelay) nextConfig.iceTransportPolicy = "relay";
+
     try {
       peerConnection.setConfiguration(nextConfig);
     } catch (configErr) {

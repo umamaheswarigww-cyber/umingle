@@ -55,48 +55,55 @@ app.use(express.static(path.join(__dirname, "public"), {
 
 // ── ICE / TURN credential service ────────────────────────
 // Provides fresh TURN credentials to clients.
-// Set env var METERED_API_KEY (from metered.ca free account) for reliable global TURN.
-// Without it, falls back to free public servers (less reliable on mobile).
 
-const STATIC_ICE = [
-  // STUN — High availability Google/Cloudflare
-  { urls: "stun:stun.l.google.com:19302"  },
-  { urls: "stun:stun1.l.google.com:19302" },
-  { urls: "stun:stun2.l.google.com:19302" },
-  { urls: "stun:stun3.l.google.com:19302" },
-  { urls: "stun:stun4.l.google.com:19302" },
-  { urls: "stun:stun.cloudflare.com:3478" },
-  
-  // TURN — FreeTURN (dedicated free TURN server)
-  { urls: "turn:freeturn.net:3479", username: "free", credential: "free" },
-  { urls: "turn:freeturn.net:5349", username: "free", credential: "free" },
+/**
+ * Builds the static ICE list, prioritizing private VPS credentials from env.
+ */
+function getStaticIceServers() {
+  const privateUrl  = process.env.TURN_URL;  // e.g. turn:turn.mydomain.com:3478
+  const privateUser = process.env.TURN_USER; // e.g. user_abc
+  const privatePass = process.env.TURN_PASS; // e.g. pass_123
 
-  // TURN — OpenRelay / Global Relay via metered.ca (Backup list)
-  // TLS (Turns 443 & 5349) — Best for mobile/VPN, 443 is often open even in hotels/offices
-  { urls: "turns:openrelay.metered.ca:443",              username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turns:openrelay.metered.ca:5349",             username: "openrelayproject", credential: "openrelayproject" },
-  
-  // TCP 443 & 80 — Non-TLS fallbacks for restrictive networks that block UDP/5349
-  { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turn:openrelay.metered.ca:80?transport=tcp",  username: "openrelayproject", credential: "openrelayproject" },
-  
-  // UDP — Traditional WebRTC relay
-  { urls: "turn:openrelay.metered.ca:80",                username: "openrelayproject", credential: "openrelayproject" },
-  { urls: "turn:openrelay.metered.ca:443",               username: "openrelayproject", credential: "openrelayproject" },
-];
+  const servers = [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" }
+  ];
 
+  // 1. ADD PRIVATE VPS (Highest Priority)
+  if (privateUrl && privateUser && privatePass) {
+    // Add both standard and TLS versions if possible
+    servers.push({ urls: privateUrl, username: privateUser, credential: privatePass });
+    // If user provided turn: domain:3478, also try to guess turns: domain:5349
+    if (privateUrl.startsWith("turn:") && !privateUrl.includes("turns:")) {
+      const secureUrl = privateUrl.replace("turn:", "turns:").replace(":3478", ":5349");
+      servers.push({ urls: secureUrl, username: privateUser, credential: privatePass });
+    }
+  }
 
+  // 2. ADD PUBLIC REDUNDANCY (Fallback)
+  servers.push(
+    { urls: "turn:freeturn.net:3479", username: "free", credential: "free" },
+    { urls: "turn:freeturn.net:5349", username: "free", credential: "free" },
+    { urls: "turns:openrelay.metered.ca:443",              username: "openrelayproject", credential: "openrelayproject" },
+    { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" }
+  );
 
+  return servers;
+}
+
+const STATIC_ICE = getStaticIceServers();
 
 let _iceCache = null;
 let _iceCacheTime = 0;
-const ICE_CACHE_TTL = 55 * 60 * 1000; // 55 min (Metered creds valid ~1hr)
+const ICE_CACHE_TTL = 55 * 60 * 1000;
 
 async function getIceServers() {
   if (_iceCache && Date.now() - _iceCacheTime < ICE_CACHE_TTL) return _iceCache;
 
   const apiKey  = process.env.METERED_API_KEY;
   const appName = process.env.METERED_APP_NAME || "omingle";
+
+  const baseServers = getStaticIceServers();
 
   if (apiKey) {
     const https = require("https");
@@ -114,9 +121,8 @@ async function getIceServers() {
         ).on("error", reject);
       });
       if (Array.isArray(data) && data.length > 0) {
-        _iceCache    = data;
+        _iceCache    = [...baseServers, ...data];
         _iceCacheTime = Date.now();
-        console.log(`[TURN] Fetched ${data.length} servers from Metered.ca`);
         return _iceCache;
       }
     } catch (e) {
@@ -124,14 +130,17 @@ async function getIceServers() {
     }
   }
 
-  // Static fallback
-  _iceCache    = STATIC_ICE;
+  _iceCache    = baseServers;
   _iceCacheTime = Date.now();
   return _iceCache;
 }
 
-// Called eagerly at startup so cache is warm before first user arrives
+// Warm cache
 getIceServers().catch(() => {});
+
+
+
+
 
 // ── Health-check endpoint (Render uses this) ──────────────
 app.get("/healthz", (_req, res) => res.json({ ok: true, users: users.size }));
