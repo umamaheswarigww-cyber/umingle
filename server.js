@@ -28,6 +28,13 @@ const app    = express();
 const server = http.createServer(app);
 
 const PORT = process.env.PORT || 3000;
+const DEFAULT_IP_MAX = 100;
+const IP_MAX = (() => {
+  const parsed = Number.parseInt(process.env.IP_MAX || "", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_IP_MAX;
+})();
+const MAX_RELAY_VIDEO_BYTES = 256 * 1024;
+const MAX_RELAY_AUDIO_BYTES = 32 * 1024;
 
 // ── Middleware ────────────────────────────────────────────
 // Gzip all text responses — shrinks CSS/JS by ~70%, faster global load
@@ -52,9 +59,12 @@ app.use(express.static(path.join(__dirname, "public"), {
 // Without it, falls back to free public servers (less reliable on mobile).
 
 const STATIC_ICE = [
-  // STUN — always available, no auth, used for direct P2P
+  // STUN — High availability Google/Cloudflare
   { urls: "stun:stun.l.google.com:19302"  },
   { urls: "stun:stun1.l.google.com:19302" },
+  { urls: "stun:stun2.l.google.com:19302" },
+  { urls: "stun:stun3.l.google.com:19302" },
+  { urls: "stun:stun4.l.google.com:19302" },
   { urls: "stun:stun.cloudflare.com:3478" },
   
   // TURN — FreeTURN (dedicated free TURN server)
@@ -62,15 +72,17 @@ const STATIC_ICE = [
   { urls: "turn:freeturn.net:5349", username: "free", credential: "free" },
 
   // TURN — OpenRelay / Global Relay via metered.ca (Backup list)
-  // TLS (Turns 443) — Best for bypassing firewalls
+  // TLS (Turns 443) — Standard HTTPS port, highly resistant to firewall blocking
   { urls: "turns:openrelay.metered.ca:443",              username: "openrelayproject", credential: "openrelayproject" },
-  // TCP 443 — Standard HTTPS port
+  // TCP 443 — Standard HTTPS port (Non-TLS TURN)
   { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
   // TCP 80 — Standard HTTP port
   { urls: "turn:openrelay.metered.ca:80?transport=tcp",  username: "openrelayproject", credential: "openrelayproject" },
   // UDP — Traditional WebRTC relay
   { urls: "turn:openrelay.metered.ca:80",                username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:openrelay.metered.ca:443",               username: "openrelayproject", credential: "openrelayproject" },
 ];
+
 
 
 let _iceCache = null;
@@ -134,8 +146,8 @@ app.get("/api/ice-servers", async (_req, res) => {
 // ── Socket.IO ─────────────────────────────────────────────
 const io = new Server(server, {
   transports: ["websocket", "polling"],
-  pingTimeout:        45000,
-  pingInterval:       15000,
+  pingTimeout:        60000,
+  pingInterval:       20000,
   // 1 MB — large packet buffer for high-latency mobile/VPN socket.io relay traffic
   maxHttpBufferSize:  1e6,
   connectionStateRecovery: {
@@ -161,8 +173,6 @@ const rateLimits = new Map(); // socketId → lastMessageTimestamp
 const ipConns    = new Map(); // ip       → connectionCount
 const disconnectTimers = new Map(); // socketId → cleanup timeout
 const DISCONNECT_GRACE_MS = (2 * 60 * 1000) + 5000;
-
-const IP_MAX = 10; // max simultaneous connections per IP (generous for NAT/proxies)
 
 // Periodic GC — remove stale rate-limit entries (prevents slow memory leak)
 setInterval(() => {
@@ -216,6 +226,14 @@ function removeFromAllPools(socketId) {
 
 function makeRoomId(a, b) {
   return `room_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function binarySize(payload) {
+  if (!payload) return 0;
+  if (typeof payload.byteLength === "number") return payload.byteLength;
+  if (ArrayBuffer.isView(payload)) return payload.byteLength;
+  if (typeof payload.length === "number") return payload.length;
+  return 0;
 }
 
 function broadcastCount() {
@@ -533,20 +551,22 @@ io.on("connection", (socket) => {
 
   socket.on("relay-video-frame", (frame) => {
     const user = users.get(socket.id);
-    if (!user?.partnerId) return;
+    if (!user?.partnerId || user.mode !== "video") return;
     // Max 30 frames/sec to prevent flooding
     const now = Date.now();
     if (now - _lastVideoRelay < 33) return;
+    if (binarySize(frame) > MAX_RELAY_VIDEO_BYTES) return;
     _lastVideoRelay = now;
     io.to(user.partnerId).emit("relay-video-frame", frame);
   });
 
   socket.on("relay-audio-chunk", (chunk) => {
     const user = users.get(socket.id);
-    if (!user?.partnerId) return;
+    if (!user?.partnerId || user.mode !== "video") return;
     // Max 50 audio chunks/sec
     const now = Date.now();
     if (now - _lastAudioRelay < 20) return;
+    if (binarySize(chunk) > MAX_RELAY_AUDIO_BYTES) return;
     _lastAudioRelay = now;
     io.to(user.partnerId).emit("relay-audio-chunk", chunk);
   });
