@@ -72,16 +72,19 @@ const STATIC_ICE = [
   { urls: "turn:freeturn.net:5349", username: "free", credential: "free" },
 
   // TURN — OpenRelay / Global Relay via metered.ca (Backup list)
-  // TLS (Turns 443) — Standard HTTPS port, highly resistant to firewall blocking
+  // TLS (Turns 443 & 5349) — Best for mobile/VPN, 443 is often open even in hotels/offices
   { urls: "turns:openrelay.metered.ca:443",              username: "openrelayproject", credential: "openrelayproject" },
-  // TCP 443 — Standard HTTPS port (Non-TLS TURN)
+  { urls: "turns:openrelay.metered.ca:5349",             username: "openrelayproject", credential: "openrelayproject" },
+  
+  // TCP 443 & 80 — Non-TLS fallbacks for restrictive networks that block UDP/5349
   { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
-  // TCP 80 — Standard HTTP port
   { urls: "turn:openrelay.metered.ca:80?transport=tcp",  username: "openrelayproject", credential: "openrelayproject" },
+  
   // UDP — Traditional WebRTC relay
   { urls: "turn:openrelay.metered.ca:80",                username: "openrelayproject", credential: "openrelayproject" },
   { urls: "turn:openrelay.metered.ca:443",               username: "openrelayproject", credential: "openrelayproject" },
 ];
+
 
 
 

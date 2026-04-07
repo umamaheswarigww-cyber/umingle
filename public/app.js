@@ -519,16 +519,19 @@ const DEFAULT_ICE_SERVERS = [
   { urls: "turn:freeturn.net:5349", username: "free", credential: "free" },
 
   // TURN — OpenRelay / Global Relay via metered.ca (Backup list)
-  // TLS (Turns 443) — Standard HTTPS port, highly resistant to firewall blocking
+  // TLS (Turns 443 & 5349) — Best for mobile/VPN
   { urls: "turns:openrelay.metered.ca:443",              username: "openrelayproject", credential: "openrelayproject" },
-  // TCP 443 — Standard HTTPS port (Non-TLS TURN)
+  { urls: "turns:openrelay.metered.ca:5349",             username: "openrelayproject", credential: "openrelayproject" },
+  
+  // TCP 443 & 80 — Non-TLS fallbacks for restrictive networks that block UDP/5349
   { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
-  // TCP 80 — Standard HTTP port
   { urls: "turn:openrelay.metered.ca:80?transport=tcp",  username: "openrelayproject", credential: "openrelayproject" },
+  
   // UDP — Traditional WebRTC relay
   { urls: "turn:openrelay.metered.ca:80",                username: "openrelayproject", credential: "openrelayproject" },
   { urls: "turn:openrelay.metered.ca:443",               username: "openrelayproject", credential: "openrelayproject" },
 ];
+
 
 
 function cloneIceServer(server) {
@@ -1051,12 +1054,26 @@ function buildPeerConnection() {
       }
       socket.emit("webrtc-ice-candidate", { candidate: c });
     } else {
-      // Null candidate = gathering complete
-      console.log("[ICE] Gathering complete. Local candidates:",
-        peerConnection.localDescription?.sdp
-          ?.split("\n").filter(l => l.startsWith("a=candidate")).length ?? 0);
+      // ── Diagnostics: Host-Only Candidate Check ─────────────
+      // If gathering is complete and we found ONLY host candidates,
+      // it's a 100% indicator that STUN/TURN is blocked or unreachable.
+      const sdp = peerConnection.localDescription?.sdp || "";
+      const hasSrflx = sdp.includes("typ srflx");
+      const hasRelay = sdp.includes("typ relay");
+
+      console.log(`[ICE] Gathering complete. Local candidates:`, sdp.split("\n").filter(l => l.startsWith("a=candidate")).length);
+
+      if (!hasSrflx && !hasRelay && isMatched && currentMode === "video") {
+        console.warn("%c[ICE] CRITICAL: Only host candidates found. TURN is unreachable/blocked!", "color:red;font-weight:bold");
+        showToast("Restricted network detected. Trying relay fallback...", "warn", 6000);
+        // Force an early relay-only restart
+        if (_isOfferer) {
+          _doIceRestart(true).catch(() => {});
+        }
+      }
     }
   };
+
 
   // ── ICE connection state — fires reliably on mobile (unlike connectionstatechange) ──
   peerConnection.oniceconnectionstatechange = () => {
@@ -1497,22 +1514,26 @@ socket.on("matched", ({ strangerGender, strangerName, mode, sharedInterests: si 
       }
     });
 
-    // Second watchdog at 10s — HARD RESTART with 'relay' policy + Media Reset
+    // Second watchdog at 10s — FORCED RELAY POLICY (Mandatory for strict NAT)
     scheduleMatchWatchdog(10000, () => {
       if (!isMatched || !peerConnection) return;
       if (!_remoteIsPlaying) {
-        console.warn("[watchdog] Still black at 10s — FORCING RELAY + HARD MEDIA RESET");
+        console.warn("[watchdog] Connection failed at 10s — Forcing 'relay' transport policy");
         
-        // Jiggle the camera hardware (sometimes mobile browsers get 'stuck' on older streams)
+        // Hard media reset to help mobile browser recovery
         if (localStream) {
           localVideo.srcObject = null;
-          setTimeout(() => { localVideo.srcObject = localStream; }, 50);
+          setTimeout(() => { 
+            if (localVideo) localVideo.srcObject = localStream; 
+          }, 50);
         }
 
+        // Specifically set the policy to 'relay' to bypass stuck NATs
         _iceRestartPending = false;
         _doIceRestart(true);
       }
     });
+
 
     // ── ABSOLUTE NEXT RESORT: Socket.io relay at 14s ─────────────────────────
     // Fires for BOTH sides (no glare risk — relay is just capture+send).
