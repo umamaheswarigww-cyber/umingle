@@ -717,25 +717,24 @@ kbd {
   gap: 8px;
 }
 
-/* Chat main */
+/* Chat main — flex column so video-stage height is always honoured */
 .chat-main {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 16px;
   min-height: calc(100vh - 180px);
 }
 
-/* =============================================================
-   VIDEO STAGE — padding-bottom 16:9 trick
-   width-based height is 100% reliable in any grid/flex layout.
-   padding-bottom:56.25% = 9/16 of element width (always correct).
-   Absolutely-positioned children fill the padding box perfectly.
-   ============================================================= */
+/* ════════════════════════════════════════════════════
+   VIDEO STAGE — explicit clamp() height.
+   clamp(min, preferred, max) is a REAL height the flex/grid parent resolves.
+   45vh gives ~405px on a 900px screen. Always fills correctly.
+   ════════════════════════════════════════════════════ */
 .video-stage {
   position: relative;
   width: 100%;
-  height: 0;                   /* content height is 0 */
-  padding-bottom: 56.25%;      /* 16:9  →  height = width × 9/16 */
+  flex-shrink: 0;              /* don't let flex shrink the video */
+  height: clamp(300px, 45vh, 580px);
   background: #000;
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
@@ -750,7 +749,7 @@ kbd {
   background: #000;
 }
 
-/* Remote card fills 100% of the padding box — top/left/width/height explicit */
+/* Remote card fills the ENTIRE stage — all four sides pinned, size explicit */
 .remote-card {
   top: 0;
   left: 0;
@@ -759,16 +758,16 @@ kbd {
   border-radius: var(--radius-xl);
 }
 
-/* Local PIP — bottom-right corner, fixed size */
+/* Local PIP — bottom-right corner, fixed pixel size */
 .local-card {
   right: 16px;
   bottom: 16px;
-  width: min(200px, 28%);
-  height: min(150px, 33%);
+  width: 180px;
+  height: 135px;
   border-radius: var(--radius-md);
-  border: 2px solid rgba(255,255,255,0.18);
-  box-shadow: var(--shadow-md);
-  z-index: 2;
+  border: 2px solid rgba(255,255,255,0.22);
+  box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+  z-index: 3;
 }
 
 
@@ -811,26 +810,27 @@ kbd {
 .conn-dot.relay   { background: var(--purple); box-shadow: 0 0 8px var(--purple-glow); }
 .conn-dot.offline { background: var(--danger); box-shadow: 0 0 8px var(--danger-glow); }
 
-/* Every video inside a card fills it completely */
+/* Every video element fills its card edge-to-edge */
 .video-card video {
   position: absolute;
   top: 0;
   left: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
+  width: 100%  !important;
+  height: 100% !important;
+  object-fit: cover !important;
   display: block;
 }
 
-/* Remote video — cover fills edge-to-edge, black behind stream */
+/* Remote stream — cover, black behind stream */
 #remoteVideo {
-  object-fit: cover;
+  object-fit: cover !important;
   background: #000;
+  z-index: 1;
 }
 
-/* Local preview — cover + mirror */
+/* Local selfie preview — cover + mirror */
 #localVideo {
-  object-fit: cover;
+  object-fit: cover !important;
   background: #000;
   transform: scaleX(-1);
 }
@@ -923,8 +923,8 @@ kbd {
   border-radius: var(--radius-xl);
   overflow: hidden;
   box-shadow: var(--shadow-md);
-  min-height: 340px;
-  max-height: 480px;
+  flex: 1;               /* fill remaining space in flex-column chat-main */
+  min-height: 280px;
 }
 
 .messages-panel__head {
@@ -1343,56 +1343,40 @@ kbd {
   .chat-sidebar { order: 2; }
   .chat-main    { order: 1; }
 
-  /* ── VIDEO STAGE — override desktop padding-bottom with width-based height ── */
+  /* ── VIDEO STAGE: explicit height (clamp preserves 16:9 on mobile) ── */
   .video-stage {
-    flex-shrink: 0;
+    flex-shrink: 0 !important;
     width: 100% !important;
-    /* Reset the desktop padding-bottom trick, use direct height */
-    padding-bottom: 0 !important;
-    /* 56.25vw = 16:9 based on screen WIDTH (always correct on mobile) */
-    height: 56.25vw !important;
-    min-height: 200px !important;
-    max-height: 320px !important;
+    height: clamp(200px, 56.25vw, 300px) !important;
+    padding-bottom: 0 !important;   /* cancel desktop padding trick */
     border-radius: 0 !important;
     border-left:  none !important;
     border-right: none !important;
     border-top:   none !important;
-    display: block !important;
     margin: 0;
-    padding-left: 0;
-    padding-right: 0;
-    padding-top: 0;
     position: relative;
     background: #000;
     box-shadow: none;
   }
 
-  /* Remote card — fill 100% of the stage, all properties explicit */
+  /* Remote card fills stage completely */
   .remote-card {
+    position: absolute !important;
     top: 0 !important;
     left: 0 !important;
-    right: 0 !important;
-    bottom: 0 !important;
     width: 100% !important;
     height: 100% !important;
     border-radius: 0 !important;
     border: none !important;
   }
 
-  .text-mode-notice {
-    flex-shrink: 0;
-    min-height: auto !important;
-    height: auto;
-    padding: 16px 10px;
-    border-radius: 0;
-  }
-
   /* Local PIP */
   .local-card {
-    width: 28%; height: 30%;
-    min-width: 80px; min-height: 68px;
-    right: 8px; bottom: 8px;
-    border-radius: var(--radius-sm) !important;
+    width: 100px !important;
+    height: 75px !important;
+    right: 8px !important;
+    bottom: 8px !important;
+    border-radius: 8px !important;
   }
 
   /* ── CONTROLS STRIP ── */

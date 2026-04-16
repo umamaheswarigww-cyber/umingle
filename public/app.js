@@ -1886,7 +1886,44 @@ socket.on("connect", () => {
 });
 
 
-// ── Init ──────────────────────────────────────────────────
+// ── Video Layout Safety Net ─────────────────────────────────
+// ResizeObserver forces the remote video / card to fill the stage
+// with exact pixel values, overriding any CSS cascade issue.
+(function enforceVideoFill() {
+  const stage   = document.getElementById("videoStage");
+  const card    = document.getElementById("remoteCard");
+  const rVideo  = document.getElementById("remoteVideo");
+  if (!stage || !card || !rVideo) return;
+
+  function applyFill() {
+    const w = stage.offsetWidth;
+    const h = stage.offsetHeight;
+    if (!w || !h) return;
+
+    // Force card to fill stage
+    card.style.cssText  = [
+      "position:absolute", "top:0", "left:0",
+      `width:${w}px`, `height:${h}px`,
+      "overflow:hidden",
+    ].join("!important;") + "!important";
+
+    // Force video to fill card
+    rVideo.style.cssText = [
+      "position:absolute", "top:0", "left:0",
+      `width:${w}px`, `height:${h}px`,
+      "object-fit:cover", "display:block", "background:#000",
+    ].join("!important;") + "!important";
+  }
+
+  // Apply immediately and on every resize
+  applyFill();
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(applyFill).observe(stage);
+  }
+  window.addEventListener("resize", applyFill);
+})();
+
+
 renderInterestPreview();
 syncModeUi(getSelectedMode());
 setChatEnabled(false);
