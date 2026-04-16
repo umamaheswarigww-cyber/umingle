@@ -728,32 +728,35 @@ kbd {
 /* Video stage */
 .video-stage {
   position: relative;
-  background: var(--panel);
+  background: #000;
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
   overflow: hidden;
-  min-height: 420px;
+  /* Taller stage — aspect-ratio drives height responsively */
+  min-height: 480px;
+  aspect-ratio: 16 / 9;
   box-shadow: var(--shadow-lg);
 }
 
 .video-card {
   position: absolute;
-  border-radius: var(--radius-lg);
   overflow: hidden;
-  background: rgba(255,255,255,0.03);
-  border: 1px solid var(--border);
+  background: #000;
 }
 
+/* Remote fills the ENTIRE stage — zero inset, edge-to-edge */
 .remote-card {
-  inset: 16px;
+  inset: 0;
+  border-radius: var(--radius-xl);
 }
 
 .local-card {
-  right: 28px;
-  bottom: 28px;
-  width: min(220px, 30%);
-  height: min(165px, 35%);
-  border: 2px solid rgba(255,255,255,0.12);
+  right: 16px;
+  bottom: 16px;
+  width: min(200px, 28%);
+  height: min(150px, 33%);
+  border-radius: var(--radius-md);
+  border: 2px solid rgba(255,255,255,0.18);
   box-shadow: var(--shadow-md);
   z-index: 2;
 }
@@ -802,18 +805,19 @@ kbd {
   height: 100%;
   object-fit: cover;
   display: block;
+  position: absolute;
+  inset: 0;
 }
 
-/* Remote video (Stranger) — contain prevents portrait phone stream
-   from being cropped/zoomed on a landscape laptop screen */
+/* Remote video — cover fills the full card, no black bars */
 #remoteVideo {
-  object-fit: contain;
+  object-fit: cover;
   background: #000;
 }
 
-/* Local (self) preview — contain so face isn't cropped, mirror like a selfie camera */
+/* Local preview — cover + mirror like a selfie camera */
 #localVideo {
-  object-fit: contain;
+  object-fit: cover;
   background: #000;
   transform: scaleX(-1);
 }
@@ -1326,14 +1330,15 @@ kbd {
   .chat-sidebar { order: 2; }
   .chat-main    { order: 1; }
 
-  /* ── VIDEO STAGE — full width, larger height ── */
+  /* ── VIDEO STAGE — full width, taller height ── */
   .video-stage {
     flex-shrink: 0;
     width: 100% !important;
-    /* Use viewport-relative height so it never overflows the screen */
-    height: 40vh;
-    min-height: 200px !important;
-    max-height: 44vh;
+    /* Generous height so remote video fully renders */
+    height: 42vh;
+    min-height: 220px !important;
+    max-height: 46vh;
+    aspect-ratio: unset;
     border-radius: 0;
     border-left:  none;
     border-right: none;
@@ -1344,10 +1349,11 @@ kbd {
     position: relative;
   }
 
-  /* Remote (Stranger) card — fill the full stage, no inset gap */
+  /* Remote (Stranger) card — fill the full stage edge-to-edge */
   .remote-card {
     inset: 0 !important;
     border-radius: 0 !important;
+    border: none !important;
   }
 
   .text-mode-notice {
@@ -1363,6 +1369,7 @@ kbd {
     width: 28%; height: 30%;
     min-width: 80px; min-height: 68px;
     right: 8px; bottom: 8px;
+    border-radius: var(--radius-sm) !important;
   }
 
   /* ── CONTROLS STRIP ── */

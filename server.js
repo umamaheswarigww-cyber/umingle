@@ -58,6 +58,9 @@ app.use(express.static(path.join(__dirname, "public"), {
 
 /**
  * Builds the static ICE list, prioritizing private VPS credentials from env.
+ * Includes UDP, TCP, and TLS variants of every TURN entry to guarantee
+ * at least one transport works on every network (mobile data blocks UDP,
+ * corporate firewalls block non-443 TCP, mobile data over VPN needs TLS).
  */
 function getStaticIceServers() {
   const privateUrl  = process.env.TURN_URL;  // e.g. turn:turn.mydomain.com:3478
@@ -66,26 +69,42 @@ function getStaticIceServers() {
 
   const servers = [
     { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" }
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun.cloudflare.com:3478" }
   ];
 
-  // 1. ADD PRIVATE VPS (Highest Priority)
+  // 1. ADD PRIVATE VPS TURN (Highest Priority — UDP, TCP, and TLS)
   if (privateUrl && privateUser && privatePass) {
-    // Add both standard and TLS versions if possible
+    // Extract domain from the provided URL
+    const domainMatch = privateUrl.match(/turn[s]?:([^:?]+)/);
+    const domain = domainMatch ? domainMatch[1] : null;
+    
+    // Primary URL as-is
     servers.push({ urls: privateUrl, username: privateUser, credential: privatePass });
-    // If user provided turn: domain:3478, also try to guess turns: domain:5349
-    if (privateUrl.startsWith("turn:") && !privateUrl.includes("turns:")) {
-      const secureUrl = privateUrl.replace("turn:", "turns:").replace(":3478", ":5349");
-      servers.push({ urls: secureUrl, username: privateUser, credential: privatePass });
+    
+    if (domain) {
+      // TCP transport on 3478
+      if (!privateUrl.includes("transport=tcp")) {
+        servers.push({ urls: `turn:${domain}:3478?transport=tcp`, username: privateUser, credential: privatePass });
+      }
+      // TLS on 5349 (critical for mobile data + VPN)
+      servers.push({ urls: `turns:${domain}:5349?transport=tcp`, username: privateUser, credential: privatePass });
+    } else {
+      // Guess TLS URL from plain turn: URL
+      if (privateUrl.startsWith("turn:") && !privateUrl.includes("turns:")) {
+        const secureUrl = privateUrl.replace("turn:", "turns:").replace(":3478", ":5349");
+        servers.push({ urls: secureUrl, username: privateUser, credential: privatePass });
+      }
     }
   }
 
-  // 2. ADD PUBLIC REDUNDANCY (Fallback)
+  // 2. ADD PUBLIC REDUNDANCY (Fallback — always available)
   servers.push(
-    { urls: "turn:freeturn.net:3479", username: "free", credential: "free" },
-    { urls: "turn:freeturn.net:5349", username: "free", credential: "free" },
-    { urls: "turns:openrelay.metered.ca:443",              username: "openrelayproject", credential: "openrelayproject" },
-    { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" }
+    { urls: "turn:freeturn.net:3479",                       username: "free", credential: "free" },
+    { urls: "turn:freeturn.net:3479?transport=tcp",         username: "free", credential: "free" },
+    { urls: "turns:freeturn.net:5349?transport=tcp",        username: "free", credential: "free" },
+    { urls: "turns:openrelay.metered.ca:443",               username: "openrelayproject", credential: "openrelayproject" },
+    { urls: "turn:openrelay.metered.ca:443?transport=tcp",  username: "openrelayproject", credential: "openrelayproject" }
   );
 
   return servers;

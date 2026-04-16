@@ -505,13 +505,22 @@ socket.on("relay-audio-chunk", (chunk) => {
 // ── WebRTC config ─────────────────────────────────────────
 // ── WebRTC config ─────────────────────────────────────────
 /**
- * Local fallback servers. These are only used if the server-side 
- * /api/ice-servers fetch fails.
+ * Local fallback servers used when /api/ice-servers fetch fails.
+ * Includes TURN UDP, TCP and TLS to survive every network topology:
+ *   - Mobile data: TURN UDP usually blocked → TCP works
+ *   - VPN / corporate: port 3478 blocked → turns:443 works
+ *   - All networks: Socket.io relay is the absolute last resort
  */
 const DEFAULT_ICE_SERVERS = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" },
-  { urls: "stun:stun.cloudflare.com:3478" }
+  { urls: "stun:stun.cloudflare.com:3478" },
+  // Free TURN UDP + TCP + TLS — provides relay even without a private VPS
+  { urls: "turn:freeturn.net:3479",                      username: "free", credential: "free" },
+  { urls: "turn:freeturn.net:3479?transport=tcp",        username: "free", credential: "free" },
+  { urls: "turns:freeturn.net:5349?transport=tcp",       username: "free", credential: "free" },
+  { urls: "turns:openrelay.metered.ca:443",              username: "openrelayproject", credential: "openrelayproject" },
+  { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" }
 ];
 
 
@@ -1085,11 +1094,16 @@ function buildPeerConnection() {
     if (s === "disconnected") {
       statusBadge.textContent = "Reconnecting…";
       updateConnStatus("offline", "Signal Weak");
-      scheduleRelayFallback("ICE stayed disconnected", 9000);
+      // Faster fallback on disconnect — 9s is too long for mobile UX
+      scheduleRelayFallback("ICE stayed disconnected", 6000);
     }
     if (s === "failed") {
-      console.warn("[ICE] Connection failed — forcing ICE restart with 'relay' policy...");
+      console.warn("[ICE] Connection failed — forcing relay-only ICE restart immediately...");
+      updateConnStatus("offline", "ICE Failed");
+      // Immediate relay-only restart — no waiting
       _doIceRestart(true);
+      // If relay restart also fails, Socket.io relay at 8s
+      scheduleRelayFallback("ICE failed, relay restart pending", 8000);
     }
   };
 
@@ -1132,8 +1146,8 @@ async function _doIceRestart(forceRelay = false) {
     }
     const offer = await peerConnection.createOffer({ iceRestart: true });
     
-    // ── SDP MUNGING: Prefer H.264 for mobile/efficiency ──
-    const mungedSdp = preferCodec(offer.sdp, "H264");
+    // ── SDP MUNGING: Prefer VP8 (matches createOffer) ──
+    const mungedSdp = preferCodec(offer.sdp, "VP8");
     offer.sdp = mungedSdp;
 
     await peerConnection.setLocalDescription(offer);
@@ -1164,8 +1178,10 @@ async function createOffer() {
       offerToReceiveVideo: true
     });
 
-    // ── SDP MUNGING: Prefer H.264 ──
-    offer.sdp = preferCodec(offer.sdp, "H264");
+    // ── SDP MUNGING: Prefer VP8 for max cross-platform compat ──
+    // VP8 is supported universally. H264 hardware acceleration can cause
+    // black screens on Android when codec mismatch occurs.
+    offer.sdp = preferCodec(offer.sdp, "VP8");
 
     await peerConnection.setLocalDescription(offer);
     socket.emit("webrtc-offer", { sdp: peerConnection.localDescription });
@@ -1502,7 +1518,7 @@ socket.on("matched", ({ strangerGender, strangerName, mode, sharedInterests: si 
       updateConnStatus("offline", "Firewall detected");
     });
 
-    // First watchdog at 5s — retry ICE restart
+    // ── WATCHDOG 2: ICE restart at 5s if no video yet ──
     scheduleMatchWatchdog(5000, () => {
       if (!isMatched || !peerConnection) return;
       if (!_remoteIsPlaying) {
@@ -1511,13 +1527,13 @@ socket.on("matched", ({ strangerGender, strangerName, mode, sharedInterests: si 
       }
     });
 
-    // Second watchdog at 10s — FORCED RELAY POLICY (Mandatory for strict NAT)
-    scheduleMatchWatchdog(10000, () => {
+    // ── WATCHDOG 3: Force relay-only at 8s (was 10s — faster for mobile UX) ──
+    scheduleMatchWatchdog(8000, () => {
       if (!isMatched || !peerConnection) return;
       if (!_remoteIsPlaying) {
-        console.warn("[watchdog] Connection failed at 10s — Forcing 'relay' transport policy");
+        console.warn("[watchdog] Connection failed at 8s — Forcing relay transport policy");
         
-        // Hard media reset to help mobile browser recovery
+        // Hard media reset helps mobile browser recover
         if (localStream) {
           localVideo.srcObject = null;
           setTimeout(() => { 
@@ -1525,7 +1541,6 @@ socket.on("matched", ({ strangerGender, strangerName, mode, sharedInterests: si 
           }, 50);
         }
 
-        // Specifically set the policy to 'relay' to bypass stuck NATs
         _iceRestartPending = false;
         _doIceRestart(true);
       }
@@ -1536,11 +1551,11 @@ socket.on("matched", ({ strangerGender, strangerName, mode, sharedInterests: si 
     // Fires for BOTH sides (no glare risk — relay is just capture+send).
     // If remote video is still black after 14s, WebRTC has completely failed.
     // Switch to Socket.io relay which works on ANY network.
-    scheduleMatchWatchdog(14000, () => {
+    scheduleMatchWatchdog(12000, () => {
       if (!isMatched) return;
       const stillBlack = !_relayActive && !_remoteIsPlaying;
       if (stillBlack) {
-        console.warn("[watchdog] WebRTC totally failed at 14s — starting Socket.io relay");
+        console.warn("[watchdog] WebRTC totally failed at 12s — starting Socket.io relay");
         _startSocketRelay();
       }
     });
