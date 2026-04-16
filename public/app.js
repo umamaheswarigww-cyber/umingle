@@ -1107,16 +1107,16 @@ function buildPeerConnection() {
     if (s === "disconnected") {
       statusBadge.textContent = "Reconnecting…";
       updateConnStatus("offline", "Signal Weak");
-      // Faster fallback on disconnect — 9s is too long for mobile UX
-      scheduleRelayFallback("ICE stayed disconnected", 6000);
+      // ICE disconnected — retry with relay after 6s
+      setTimeout(() => {
+        if (isMatched && peerConnection && !_remoteIsPlaying) _doIceRestart(true);
+      }, 6000);
     }
     if (s === "failed") {
       console.warn("[ICE] Connection failed — forcing relay-only ICE restart immediately...");
       updateConnStatus("offline", "ICE Failed");
       // Immediate relay-only restart — no waiting
       _doIceRestart(true);
-      // If relay restart also fails, Socket.io relay at 8s
-      scheduleRelayFallback("ICE failed, relay restart pending", 8000);
     }
   };
 
@@ -1560,18 +1560,7 @@ socket.on("matched", ({ strangerGender, strangerName, mode, sharedInterests: si 
     });
 
 
-    // ── ABSOLUTE NEXT RESORT: Socket.io relay at 14s ─────────────────────────
-    // Fires for BOTH sides (no glare risk — relay is just capture+send).
-    // If remote video is still black after 14s, WebRTC has completely failed.
-    // Switch to Socket.io relay which works on ANY network.
-    scheduleMatchWatchdog(12000, () => {
-      if (!isMatched) return;
-      const stillBlack = !_relayActive && !_remoteIsPlaying;
-      if (stillBlack) {
-        console.warn("[watchdog] WebRTC totally failed at 12s — starting Socket.io relay");
-        _startSocketRelay();
-      }
-    });
+    // Socket.io canvas relay disabled — WebRTC + TURN is the final fallback.
 
   }
 });
