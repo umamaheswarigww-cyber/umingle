@@ -298,11 +298,13 @@ function scheduleRelayFallback(reason, delay = 6000) {
 }
 
 function drawRelayVideoFrame(blob) {
-  if (!_relayRemoteCtx) return;
+  if (!_relayRemoteCtx || !_relayRemoteCanvas) return;
+  const W = _relayRemoteCanvas.width  || 640;
+  const H = _relayRemoteCanvas.height || 480;
   if (typeof createImageBitmap === "function") {
     createImageBitmap(blob).then(bitmap => {
-      if (!_relayRemoteCtx) return;
-      _relayRemoteCtx.drawImage(bitmap, 0, 0, 320, 240);
+      if (!_relayRemoteCtx || !_relayRemoteCanvas) return;
+      _relayRemoteCtx.drawImage(bitmap, 0, 0, _relayRemoteCanvas.width, _relayRemoteCanvas.height);
       bitmap.close();
     }).catch(() => drawRelayVideoFrameFallback(blob));
     return;
@@ -311,11 +313,13 @@ function drawRelayVideoFrame(blob) {
 }
 
 function drawRelayVideoFrameFallback(blob) {
-  if (!_relayRemoteCtx) return;
+  if (!_relayRemoteCtx || !_relayRemoteCanvas) return;
   const url = URL.createObjectURL(blob);
   const img = new Image();
   img.onload = () => {
-    if (_relayRemoteCtx) _relayRemoteCtx.drawImage(img, 0, 0, 320, 240);
+    if (_relayRemoteCtx && _relayRemoteCanvas) {
+      _relayRemoteCtx.drawImage(img, 0, 0, _relayRemoteCanvas.width, _relayRemoteCanvas.height);
+    }
     URL.revokeObjectURL(url);
   };
   img.onerror = () => {
@@ -353,14 +357,23 @@ function _startSocketRelay() {
   _relayRemoteCanvas.style.pointerEvents = "none";
   updateConnStatus("relay", "Relay Mode");
 
-  // Keep canvas sized perfectly with the video (fixes mobile rotation offset)
+  // Keep canvas pixel buffer in sync with its CSS display size.
+  // CRITICAL: use remoteCard (always full-stage size), NOT remoteVideo
+  // — remoteVideo has no srcObject in relay mode so its height reports 0,
+  //   which was overriding height:100% with height:0px (the half-screen bug).
+  const _getRelayCanvasRect = () => {
+    const card = document.getElementById("remoteCard");
+    return card ? card.getBoundingClientRect() : { width: 640, height: 480 };
+  };
+
   _relayResizeHandler = () => {
     if (!_relayRemoteCanvas) return;
-    const rect = remoteVideo.getBoundingClientRect();
-    _relayRemoteCanvas.style.width  = rect.width  + "px";
-    _relayRemoteCanvas.style.height = rect.height + "px";
-    _relayRemoteCanvas.style.top    = remoteVideo.offsetTop  + "px";
-    _relayRemoteCanvas.style.left   = remoteVideo.offsetLeft + "px";
+    const rect = _getRelayCanvasRect();
+    // Update the internal pixel buffer to match display — fills the whole card
+    const dpr = window.devicePixelRatio || 1;
+    _relayRemoteCanvas.width  = Math.round(rect.width  * dpr) || 640;
+    _relayRemoteCanvas.height = Math.round(rect.height * dpr) || 480;
+    // CSS stays as inset:0 / 100%x100% — no need to set px values
   };
   window.addEventListener("resize", _relayResizeHandler);
   _relayResizeHandler();
